@@ -572,8 +572,14 @@ int frameStepState=0;   // 1 = requested, 2 = this frame runs, 0 = idle
 // back and the block reference is released.
 constexpr uintptr_t FN_ANIM_BLOCK_INDEX=0x4D3990,FN_GET_ANIMATION=0x4D42F0,FN_ADD_ANIMATION=0x4D4330,FN_ASSOC_SET_TIME=0x4CEA80,
     FN_FIRST_ASSOC=0x4D15E0,FN_NEXT_ASSOC=0x4D6AB0,FN_REQUEST_MODEL=0x4087E0,FN_LOAD_REQUESTED=0x40EA10,FN_ADD_BLOCK_REF=0x4D3FB0,
-    FN_REMOVE_BLOCK_REF=0x4D3FD0,ANIM_BLOCKS=0xB5D4A0;constexpr int IFP_STREAM_BASE=25575;
-BYTE* poseAssoc=nullptr;int poseBlock=-1,appliedPoseIndex=0;float appliedPoseFrame=-1;std::vector<std::pair<BYTE*,float>> poseSavedBlends;
+    FN_REMOVE_BLOCK_REF=0x4D3FD0;
+// Limit adjusters (fastman92) move the anim block table off 0xB5D4A0 and may move the IFP streaming ids: the block comes from
+// CAnimManager::GetAnimationBlock (0x4D3940, patched by them) and the id base is read from the game's own "add eax,25575" at
+// 0x408925. If that instruction is not the expected one, nothing is streamed and the pose is reported unavailable.
+BYTE* animBlock(const char* name){return reinterpret_cast<BYTE*>(reinterpret_cast<void* (__cdecl*)(const char*)>(0x4D3940)(name));}
+int ifpStreamBase(){const BYTE* site=reinterpret_cast<const BYTE*>(0x408925);if(site[0]!=0x05)return -1;
+    int base=*reinterpret_cast<const int*>(site+1);return base>=20000&&base<1000000?base:-1;}
+int poseNoticeShown=-1;BYTE* poseAssoc=nullptr;int poseBlock=-1,appliedPoseIndex=0;float appliedPoseFrame=-1;std::vector<std::pair<BYTE*,float>> poseSavedBlends;
 void* playerClump(){BYTE* ped=playerPed();return ped?mem<void*>(reinterpret_cast<uintptr_t>(ped)+0x18):nullptr;}
 void clearCjPose(){
     void* clump=playerClump();
@@ -598,7 +604,7 @@ void applyCjExpression(){
     clearCjExpression();
     if(want>0){
         int block=reinterpret_cast<int (__cdecl*)(const char*)>(FN_ANIM_BLOCK_INDEX)("ped");
-        BYTE* blockData=block>=0?reinterpret_cast<BYTE*>(ANIM_BLOCKS+static_cast<uintptr_t>(block)*0x20):nullptr;
+        BYTE* blockData=block>=0?animBlock("ped"):nullptr;
         void* hier=blockData&&blockData[0x10]?reinterpret_cast<void* (__cdecl*)(const char*,const void*)>(FN_GET_ANIMATION)(expressionDefs[want].anim,blockData):nullptr;
         if(!hier){logf("expression %s not available",expressionDefs[want].anim);menu.value[IT_EXPRESSION]=0;return;}
         expressionAssoc=reinterpret_cast<BYTE*>(reinterpret_cast<void* (__cdecl*)(void*,void*,int)>(FN_ADD_ANIMATION)(clump,hier,0x10|0x2|0x1));
@@ -641,8 +647,9 @@ void applyCjPose(){
         if(want>0){
             const PoseDef& d=poseDefs[want];
             int block=reinterpret_cast<int (__cdecl*)(const char*)>(FN_ANIM_BLOCK_INDEX)(d.block);
-            BYTE* blockData=block>=0?reinterpret_cast<BYTE*>(ANIM_BLOCKS+static_cast<uintptr_t>(block)*0x20):nullptr;
-            if(blockData&&!blockData[0x10]){reinterpret_cast<void (__cdecl*)(int,int)>(FN_REQUEST_MODEL)(IFP_STREAM_BASE+block,0x8);reinterpret_cast<void (__cdecl*)(bool)>(FN_LOAD_REQUESTED)(false);}
+            BYTE* blockData=block>=0?animBlock(d.block):nullptr;int streamBase=ifpStreamBase();
+            if(blockData&&!blockData[0x10]&&streamBase>=0){reinterpret_cast<void (__cdecl*)(int,int)>(FN_REQUEST_MODEL)(streamBase+block,0x8);reinterpret_cast<void (__cdecl*)(bool)>(FN_LOAD_REQUESTED)(false);}
+            if(blockData&&!blockData[0x10]&&streamBase<0)logf("pose: IFP stream id base not recognised at 0x408925; %s not loaded",d.block);
             void* hier=blockData&&blockData[0x10]?reinterpret_cast<void* (__cdecl*)(const char*,const void*)>(FN_GET_ANIMATION)(d.anim,blockData):nullptr;
             if(!hier){logf("pose %s/%s not available (block %d)",d.block,d.anim,block);noticeFor("Esa pose no está disponible");menu.value[IT_POSE]=0;appliedPoseIndex=0;appliedPoseFrame=frame;rebuildCjSkeleton();return;}
             reinterpret_cast<void (__cdecl*)(int)>(FN_ADD_BLOCK_REF)(block);poseBlock=block;
@@ -840,7 +847,8 @@ void phase2Frame(){
     speed=menu.value[IT_MOVE_SPEED];lookSpeed=menu.value[IT_LOOK_SPEED];maxDistance=menu.value[IT_MAX_DISTANCE];collision=menu.on(IT_COLLISION);invertY=menu.on(IT_INVERT_Y);
     syncLightMenu();
     applyHidePeople(menu.on(IT_HIDE_PEOPLE));
-    applyTimeAndWeather();applyHidePlayer();applySlowmo();if(!slowmoActive){applyCjPose();applyCjExpression();}
+    applyTimeAndWeather();applyHidePlayer();applySlowmo();if(!slowmoActive){applyCjPose();applyCjExpression();poseNoticeShown=-1;}
+    else if(menu.choice(IT_POSE)!=appliedPoseIndex&&menu.choice(IT_POSE)!=poseNoticeShown){poseNoticeShown=menu.choice(IT_POSE);noticeFor("Las poses necesitan Tiempo: Congelado");}   // slow motion keeps animating CJ
     lookAtCamera=menu.on(IT_LOOK_AT);cameraOrbit=menu.choice(IT_CAMERA_MODE)==1;freezeAnimations(!slowmoActive&&animFreezeAllowed);bypassAnimCallHooks(!slowmoActive&&animFreezeAllowed);passiveFlyingProbe();
     if(!slowmoActive&&pedPoseTiming==0)refreshPedPoses();   // old timing, kept only for A/B diagnostics
     if(menu.on(IT_MUSIC))musicStart();else musicStop();
