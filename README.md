@@ -1,0 +1,67 @@
+# Alek's Photo Mode SA
+
+A photo mode for **GTA San Andreas (1.0 US)**, inspired by the photo modes of modern games. It freezes the game, gives you a free camera, hides the HUD and saves full-resolution PNG photos.
+
+**[Download the latest release](../../releases/latest)**: get the zip under *Assets*, not the source code.
+
+## Features
+
+- **Free camera** with collision, roll and zoom, plus an **orbit camera** around CJ.
+- **CJ poses** (32) with a pose-moment slider. Sitting, lying and knocked out poses rest on the ground.
+- **Expressions** and **Look at camera** (his head follows the camera).
+- **Hide CJ** or **hide people**.
+- **Time of day and weather**: everything goes back to normal when you exit.
+- **Slow motion** and **next frame**: step the world one frame at a time.
+- **Cutscene support**: camera locked and time frozen, with a free camera in outdoor cutscenes.
+- **Lights**: up to 3 point lights, spotlights or a camera flash. **Move light** moves and aims a light while the camera stays put (like Alan Wake 2's portrait spot), or orbits it around CJ.
+- **Photo FX**: filters (B&W, sepia, cold, warm, vintage, Polaroid, 90s camcorder), exposure, contrast, saturation, temperature, vignette, grain, tilt-shift, lens drops, chromatic aberration, bloom, lens distortion, radial blur and haze.
+- **Composition**: grids, cinematic frames (2.39:1, 16:9, 4:5…), logo overlays and presets.
+- **Photo viewer** inside the game. Live **SkyGfx** preset switching.
+- Spanish and English UI. Gamepad (with GInput button icons) and keyboard/mouse.
+
+## Install
+
+1. You need GTA San Andreas **1.0 US** and an ASI Loader or Modloader.
+2. Download the zip from [Releases](../../releases/latest).
+3. With Modloader, copy the `Aleks Photo Mode` folder into `modloader`. Otherwise, copy its contents into the game folder.
+
+**Open it:** R1 + Down on a gamepad (changeable in SETTINGS), or F6 on keyboard. Full controls are in `LEEME - README.txt` inside the zip.
+
+Photos go to `Pictures\GTA San Andreas Photo Mode`. If something breaks, open an issue and attach `Aleks.PhotoMode.SA.log` from the mod folder.
+
+## Building
+
+The mod is a single 32-bit DLL (`.asi`) with no dependencies beyond the Windows SDK. It is built with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (i686):
+
+```bat
+build.bat
+```
+
+This produces `Aleks.PhotoMode.SA.asi` and runs the math tests (`test_core.exe`). The pixel shader is compiled at runtime through `d3dcompiler_47.dll`.
+
+Source layout:
+
+| File | What it holds |
+| --- | --- |
+| `src/phase1.cpp` | Entry point, hooks (D3D9, RenderWare camera, HUD, CGame::Process), freeze and free camera, capture |
+| `src/photo_phase2.inc` | Game-side features: poses, expressions, look-at, peds, lights, cutscenes, time and weather, post-FX shader |
+| `src/photo_ui.inc` | The interface: menu, prompts, photo viewer, logos, light markers |
+| `src/photo_menu.h` | Menu items, translations, pose and expression lists |
+| `src/phase1_core.h` | Portable camera math (tested by `src/test_core.cpp`) |
+
+Every game address is for GTA SA 1.0 US and was checked against [DK22Pac's plugin-sdk](https://github.com/DK22Pac/plugin-sdk) and the game binary. Before patching code, the mod checks the original bytes and leaves other mods' hooks alone.
+
+## Credits & inspiration
+
+- **Photo Mode IV – Complete Edition** for GTA IV by **ChunkLeChuck**: the original inspiration. Its menu layout, tabs and overall feel are what this mod set out to bring to San Andreas.
+- The photo modes of **The Last of Us Part II** and **Alan Wake 2** inspired the CJ poses and expressions, look-at-camera, the orbit camera and the movable lights.
+- **XTC**, for the CJ pose idea and the reference that got the pose library started.
+- Developed with the help of **Claude** (Anthropic's AI) for the coding, reverse engineering and debugging. Design, testing and every in-game check were done by Alexgg1014.
+- Thanks to the community for the feedback and bug reports: Georgian, Daviserys, XTC, XG417, adambrock and everyone in the server.
+- [DK22Pac's plugin-sdk](https://github.com/DK22Pac/plugin-sdk) and the reverse-engineering community, for the documented addresses and structures.
+
+## License
+
+[MIT](LICENSE). You can use, modify and share it; keep the copyright notice and give credit.
+
+GTA San Andreas is a trademark of Rockstar Games. This is a fan-made mod, not affiliated with Rockstar Games or Take-Two Interactive.

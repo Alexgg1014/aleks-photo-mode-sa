@@ -1,0 +1,1 @@
+Put MP3 or WAV files here. AJUSTES > MUSICA plays the first one while photo mode is open.

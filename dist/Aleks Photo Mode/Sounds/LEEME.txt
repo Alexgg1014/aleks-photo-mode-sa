@@ -1,0 +1,2 @@
+Optional WAV files: menu_open, menu_close, move, tab, select, nochange, shutter.
+A missing file is simply silent.
