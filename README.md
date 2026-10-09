@@ -4,6 +4,21 @@ A photo mode for **GTA San Andreas (1.0 US)**, inspired by the photo modes of mo
 
 **[Download the latest release](../../releases/latest)**: get the zip under *Assets*, not the source code.
 
+![A drive-by frozen mid-action](docs/screenshots/01-freeze-action.jpg)
+
+## Gallery
+
+All shots taken in game with the mod. No editing.
+
+| | | |
+| --- | --- | --- |
+| ![Cutscene](docs/screenshots/02-cutscene.jpg) | ![Lying pose](docs/screenshots/03-pose-lying.jpg) | ![Lights at night](docs/screenshots/04-lights.jpg) |
+| Cutscenes, frozen | CJ poses, resting on the ground | Movable red and blue lights |
+| ![90s camcorder filter](docs/screenshots/05-camcorder-filter.jpg) | ![Polaroid filter](docs/screenshots/06-polaroid.jpg) | ![Classic car](docs/screenshots/07-classic-car.jpg) |
+| 90s camcorder filter | Polaroid filter | Frames and logos |
+| ![Sunset](docs/screenshots/08-sunset.jpg) | ![Night](docs/screenshots/09-night.jpg) | |
+| Time of day | Night | |
+
 ## Features
 
 - **Free camera** with collision, roll and zoom, plus an **orbit camera** around CJ.
