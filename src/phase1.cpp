@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <deque>
 #include <vector>
 #include <unordered_map>
 #include "phase1_core.h"
@@ -235,7 +236,7 @@ void syncRenderCamera(){
 }
 void setViewWindow(float scale){ViewWindow window{originalWindow.x*scale,originalWindow.y*scale};
     reinterpret_cast<void* (__cdecl*)(void*,const ViewWindow*)>(0x7EE410)(mem<void*>(RW_CAMERA),&window);}
-void addPhotoLights();void lightMoveFrame();void autoTest2Frame(unsigned long long now);void autoTest6Frame(unsigned long long now);void autoTest10Frame(unsigned long long now);void autoTest7Frame(unsigned long long now);void autoTest8Frame(unsigned long long now);void autoTest9Frame(unsigned long long now);void autoTest5Frame(unsigned long long now);void refreshPedPoses();extern int pedPoseTiming;bool keyboardInput(PadState& pad,unsigned long long now,float dt);extern bool kbBoost;void autoTest3Frame(unsigned long long now);void autoTest4Frame(unsigned long long now);void phase2Open();void phase2Close();void phase2Frame();void menuInput(unsigned,unsigned,unsigned long long);
+void addPhotoLights();void lightMoveFrame();void reportDetours();void autoTest2Frame(unsigned long long now);void autoTest6Frame(unsigned long long now);void autoTest10Frame(unsigned long long now);void autoTest7Frame(unsigned long long now);void autoTest8Frame(unsigned long long now);void autoTest9Frame(unsigned long long now);void autoTest5Frame(unsigned long long now);void refreshPedPoses();extern int pedPoseTiming;bool keyboardInput(PadState& pad,unsigned long long now,float dt);extern bool kbBoost;void autoTest3Frame(unsigned long long now);void autoTest4Frame(unsigned long long now);void phase2Open();void phase2Close();void phase2Frame();void menuInput(unsigned,unsigned,unsigned long long);
 bool menuWantsCross();bool menuOwnsTriangle();bool menuOwnsSquare();
 extern bool inCutsceneSession,cutsceneCameraFree;
 void applyPose(){
@@ -307,6 +308,8 @@ bool openMode(){
     if(cutscene&&GetPrivateProfileIntW(L"PhotoMode",L"Cutscenes",1,ini)==0)return false;
     if(active||mem<bool>(USER_PAUSE)||mem<bool>(MENU)||(!cutscene&&mem<bool>(CUTSCENE_PROCESSING)))return false;
     if(!mem<void*>(RW_CAMERA)||!mem<void*>(PLAYER))return false;
+    // Where the camera/render call sites lead right now (other mods, e.g. Proper Shaders, may hook them after startup).
+    if(!diagLevel){static bool reported=false;if(!reported){reported=true;reportDetours();}}
     std::memcpy(&original,reinterpret_cast<void*>(CAMERA_MATRIX),sizeof(original));
     syncPlaceable=GetPrivateProfileIntW(L"PhotoMode",L"SyncPlaceable",1,ini)!=0;
     if(Matrix* m=mem<Matrix*>(CAMERA_PLACEABLE_MATRIX))originalPlaceable=*m;
@@ -708,7 +711,12 @@ void* __cdecl rwCameraBegin(void* camera){
     // Peds: Idle runs CWorld::ProcessPedsAfterPreRender (0x563430, ped IK) every frame even while paused, before this
     // BeginUpdate. Rebuilding the poses here, right before the scene is drawn, is the only point where they stay stable.
     if(main&&active&&caller==IDLE_FRAME_BEGIN_RETURN&&pedPoseTiming==1)refreshPedPoses();
-    if(main&&active&&caller==IDLE_FRAME_BEGIN_RETURN)addPhotoLights();   // LUCES: into the game's light list right before drawing
+    if(main&&active&&caller==IDLE_FRAME_BEGIN_RETURN){
+        // LUCES: the clip planes this frame's scene is drawn with (RwCamera nearPlane +0x80, farPlane +0x84) for the light pass,
+        // and, without Proper Shaders, our lights into the game's light list right before drawing.
+        lightNear=*reinterpret_cast<float*>(static_cast<BYTE*>(camera)+0x80);lightFar=*reinterpret_cast<float*>(static_cast<BYTE*>(camera)+0x84);
+        addPhotoLights();
+    }
     if(main&&active&&writePoint==1)applyPose();
     bool sample=diagLevel&&active&&main&&GetTickCount64()-lastBeginSample>=1000;
     if(sample){lastBeginSample=GetTickCount64();logSnap("rwBegin pre ");}

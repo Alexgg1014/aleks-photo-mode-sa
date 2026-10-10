@@ -150,27 +150,73 @@ void deleteCurrentPhoto(){
 }
 
 // ---------- settings persistence ----------
+// What the player changes in game ([Menu] and the presets) is saved in Documents\GTA San Andreas User Files\Aleks Photo Mode.ini:
+// mod managers that sync or redeploy the mod folder (MO2's physical sync) overwrote the mod's own INI and the settings came back
+// after a restart. Reading falls back to the mod's INI, so its [Menu] still works as the defaults.
+const wchar_t* userIni(){
+    static wchar_t path[MAX_PATH]{};static bool tried=false;
+    if(!tried){tried=true;wchar_t* docs=nullptr;
+        if(SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents,0,nullptr,&docs))){std::wstring dir=std::wstring(docs)+L"\\GTA San Andreas User Files";
+            SHCreateDirectoryExW(nullptr,dir.c_str(),nullptr);swprintf_s(path,L"%s\\Aleks Photo Mode.ini",dir.c_str());}
+        if(docs)CoTaskMemFree(docs);
+        if(!path[0])wcscpy_s(path,ini);
+        char u[MAX_PATH*3]{};WideCharToMultiByte(CP_UTF8,0,path,-1,u,sizeof(u),nullptr,nullptr);logf("settings file: %s",u);}
+    return path;
+}
+// Reads a key from the user settings file, or from the mod's INI when the user file does not have it yet.
+bool readSetting(const wchar_t* section,const wchar_t* key,wchar_t* out,DWORD size){
+    out[0]=0;if(GetPrivateProfileStringW(section,key,L"",out,size,userIni())&&out[0])return true;
+    return GetPrivateProfileStringW(section,key,L"",out,size,ini)&&out[0];
+}
 void saveMenu(){
-    for(auto& kv:menu.serialize(false)){std::wstring k(kv.first.begin(),kv.first.end()),v(kv.second.begin(),kv.second.end());WritePrivateProfileStringW(L"Menu",k.c_str(),v.c_str(),ini);}
+    for(auto& kv:menu.serialize(false)){std::wstring k(kv.first.begin(),kv.first.end()),v(kv.second.begin(),kv.second.end());WritePrivateProfileStringW(L"Menu",k.c_str(),v.c_str(),userIni());}
+}
+// ---------- custom poses ----------
+// [CustomPoses] in the mod's INI or in the user settings file adds poses after the built-in ones, one per line:
+//   Label=ifp block,animation[,ground]
+// The block is the .ifp's name without extension (installed through modloader like any animation, or already in the game);
+// "ground" makes the pose rest on the floor like Sitting and Lying.
+std::vector<PoseDef> poseList;std::deque<std::string> customPoseText;
+int poseCount(){return static_cast<int>(poseList.size());}
+void readCustomPoses(const wchar_t* file){
+    std::vector<wchar_t> buf(32768);DWORD n=GetPrivateProfileSectionW(L"CustomPoses",buf.data(),static_cast<DWORD>(buf.size()),file);
+    for(const wchar_t* line=buf.data();line<buf.data()+n&&*line;line+=wcslen(line)+1){
+        char u[512]{};WideCharToMultiByte(CP_UTF8,0,line,-1,u,sizeof(u),nullptr,nullptr);std::string l(u);
+        size_t eq=l.find('=');if(eq==std::string::npos||l[0]==';')continue;
+        std::string label=l.substr(0,eq),rest=l.substr(eq+1);std::vector<std::string> parts;size_t at=0;
+        while(at<=rest.size()){size_t c=rest.find(',',at);if(c==std::string::npos)c=rest.size();std::string t=rest.substr(at,c-at);
+            while(!t.empty()&&t.front()==' ')t.erase(0,1);while(!t.empty()&&(t.back()==' '||t.back()==13))t.pop_back();parts.push_back(t);at=c+1;}
+        while(!label.empty()&&label.back()==' ')label.pop_back();
+        if(label.empty()||parts.size()<2||parts[0].empty()||parts[1].empty()){logf("custom pose skipped: %s",u);continue;}
+        bool dup=false;for(const PoseDef& d:poseList)dup|=label==d.label;if(dup)continue;
+        customPoseText.push_back(parts[0]);const char* b=customPoseText.back().c_str();customPoseText.push_back(parts[1]);const char* a=customPoseText.back().c_str();
+        customPoseText.push_back(label);const char* lb=customPoseText.back().c_str();
+        poseList.push_back({b,a,lb,parts.size()>2&&parts[2]=="ground"});logf("custom pose \"%s\": %s / %s%s",lb,b,a,poseList.back().ground?" (ground)":"");
+    }
+}
+void loadPoseList(){
+    poseList.assign(std::begin(poseDefs),std::end(poseDefs));customPoseText.clear();
+    readCustomPoses(userIni());readCustomPoses(ini);
+    std::vector<std::string> names;for(const PoseDef& d:poseList)names.push_back(d.label);menu.setChoices(IT_POSE,names);
 }
 void loadMenu(){
     // Defaults come from the [PhotoMode] keys the Phase 1 INI already had.
     menu.value[IT_MOVE_SPEED]=speed;menu.value[IT_LOOK_SPEED]=lookSpeed;menu.value[IT_MAX_DISTANCE]=maxDistance;
     menu.value[IT_COLLISION]=GetPrivateProfileIntW(L"PhotoMode",L"Collision",1,ini)?1.f:0.f;
-    scanLogos();
+    scanLogos();loadPoseList();
     for(const MenuItem& i:menu.items){
         if(!*i.key)continue;std::wstring k(i.key,i.key+std::strlen(i.key));wchar_t v[128]{};
-        if(GetPrivateProfileStringW(L"Menu",k.c_str(),L"",v,128,ini)&&v[0]){char a[128]{};WideCharToMultiByte(CP_UTF8,0,v,-1,a,sizeof(a),nullptr,nullptr);menu.load(i.key,a);}
+        if(readSetting(L"Menu",k.c_str(),v,128)){char a[128]{};WideCharToMultiByte(CP_UTF8,0,v,-1,a,sizeof(a),nullptr,nullptr);menu.load(i.key,a);}
     }
 }
 void presetIo(bool save){
     int slot=menu.choice(IT_PRESET_SLOT)+1;wchar_t section[16];swprintf_s(section,L"Preset%d",slot);
-    if(save){for(auto& kv:menu.serialize(true)){std::wstring k(kv.first.begin(),kv.first.end()),v(kv.second.begin(),kv.second.end());WritePrivateProfileStringW(section,k.c_str(),v.c_str(),ini);}
+    if(save){for(auto& kv:menu.serialize(true)){std::wstring k(kv.first.begin(),kv.first.end()),v(kv.second.begin(),kv.second.end());WritePrivateProfileStringW(section,k.c_str(),v.c_str(),userIni());}
         char t[64];std::snprintf(t,sizeof(t),tr("Guardado en Custom %d",uiLang),slot);noticeFor(t);return;}
-    wchar_t probe[8]{};if(!GetPrivateProfileStringW(section,L"Filter",L"",probe,8,ini)){noticeFor("Ese preset está vacío");return;}
+    wchar_t probe[8]{};if(!readSetting(section,L"Filter",probe,8)){noticeFor("Ese preset está vacío");return;}
     for(const MenuItem& i:menu.items){
         if(!i.preset||!*i.key)continue;std::wstring k(i.key,i.key+std::strlen(i.key));wchar_t v[128]{};
-        if(GetPrivateProfileStringW(section,k.c_str(),L"",v,128,ini)&&v[0]){char a[128]{};WideCharToMultiByte(CP_UTF8,0,v,-1,a,sizeof(a),nullptr,nullptr);menu.load(i.key,a);}
+        if(readSetting(section,k.c_str(),v,128)){char a[128]{};WideCharToMultiByte(CP_UTF8,0,v,-1,a,sizeof(a),nullptr,nullptr);menu.load(i.key,a);}
     }
     char t[64];std::snprintf(t,sizeof(t),tr("Custom %d cargado",uiLang),slot);noticeFor(t);
 }
@@ -453,10 +499,10 @@ void __cdecl gameProcessHook(){if(priorGameProcess)priorGameProcess();if(active&
 unsigned long long sessionOpenedAt=0;int passiveProbeStep=0;unsigned pedProbe(const char* tag,struct ProbeStats& stats,bool onScreenOnly);
 void passiveFlyingProbe();
 // ---------- photo lights (Alan Wake 2 style) ----------
-// Up to 3 point lights placed at the photo camera (LUCES > Colocar aquí), each with colour, intensity and range. They are fed to
-// the game's own light list every frame right before the scene is drawn (CPointLights::AddLight 0x7000E0), so the game and
-// Proper Shaders light the world with them. While frozen the game may not clear its list between frames, so last frame's
-// entries of ours are taken off first (CPointLights::NumLights 0xC3F0D0) and never stack up.
+// Up to 3 lights placed at the photo camera (LUCES > Colocar aquí), each with colour, intensity and range.
+// With Proper Shaders the mod draws them itself (drawPhotoLightsPass, a post pass right before the photo FX): Proper's deferred
+// light pass kept showing an old colour and position, or nothing, while car headlights were in view. Without Proper (or without
+// its depth buffer) they go into the game's own light list right before the scene is drawn (CPointLights::AddLight 0x7000E0).
 constexpr uintptr_t FN_ADD_POINT_LIGHT=0x7000E0,POINT_LIGHT_COUNT=0xC3F0D0;
 struct PhotoLight{bool placed=false;bool on=false;Vec3 pos{},dir{0,0,0};int type=0,color=0;float intensity=60,range=10;};PhotoLight photoLights[PHOTO_LIGHTS];   // type: 0 point, 1 spotlight, 2 camera flash
 int lightSlotShown=-1;unsigned ourLightsBase=0,ourLightsCount=0;
@@ -475,7 +521,7 @@ void placeLight(){
     logf("light %d placed at (%.1f %.1f %.1f)",slot+1,l.pos.x,l.pos.y,l.pos.z);
 }
 int movingLight=-1;   // LUCES > Mover luz: the light being moved, -1 none
-void clearLights(){for(PhotoLight& l:photoLights)l=PhotoLight();lightSlotShown=-1;ourLightsCount=0;movingLight=-1;}
+void clearLights(){for(PhotoLight& l:photoLights)l=PhotoLight();lightSlotShown=-1;movingLight=-1;}
 void removeLight(){int slot=std::clamp(menu.choice(IT_LIGHT_SLOT),0,PHOTO_LIGHTS-1);if(movingLight==slot)movingLight=-1;
     photoLights[slot]=PhotoLight();lightSlotShown=-1;noticeFor("Luz quitada");}
 // ---------- moving a light (LUCES > Mover luz, like Alan Wake 2's portrait spot) ----------
@@ -518,6 +564,38 @@ void lightMoveFrame(){
     pose.pos=moveAnchorPos;yaw=moveAnchorYaw;pitch=moveAnchorPitch;   // the camera does not move
     Basis g=with_handedness(basis_from_angles(yaw,pitch,roll),gameHandedness);pose.right=g.right;pose.forward=g.forward;pose.up=g.up;
 }
+// ---------- which path draws the lights ----------
+// Proper Shaders exports, checked in ProperShaders.asi 10-26 (md5 ecbc96ef): PS_GetDepthBuffer (RVA 0x27670) is
+// "mov eax,[texture]; ret", no arguments: the IDirect3DTexture9 it renders the scene's depth into (INTZ, hardware z, created
+// at the back buffer's size). PS_IsUsingReversedDepthBuffer (0x27550) returns 0/1 in eax. With reversed depth Proper's own
+// shaders read z as 1 - stored z (its g_ZLogic constant is (-1, 1)).
+using PsDepthFn=IDirect3DTexture9* (__cdecl*)();using PsFlagFn=int (__cdecl*)();
+PsDepthFn psDepthBuffer=nullptr;PsDepthFn psNormalsBuffer=nullptr;PsFlagFn psReversedDepth=nullptr;int properDepthState=0;bool properReversedIni=false;   // state: 0 not checked, 1 found, -1 not there
+bool shaderLightsBroken=false;   // the light shader failed to build or Proper gave no depth: the lights go back to CPointLights
+float lightNear=0,lightFar=0;    // the main camera's clip planes (RwCamera +0x80/+0x84), read when the scene's camera begins
+bool lightPassLogged=false;      // the first light pass of each session logs its inputs
+bool properDepthReady(){
+    if(!properDepthState){
+        properDepthState=-1;HMODULE ps=GetModuleHandleW(L"ProperShaders.asi");
+        if(!ps)log("lights: Proper Shaders not loaded; lights go through CPointLights");
+        else{
+            psDepthBuffer=reinterpret_cast<PsDepthFn>(GetProcAddress(ps,"PS_GetDepthBuffer"));
+            psReversedDepth=reinterpret_cast<PsFlagFn>(GetProcAddress(ps,"PS_IsUsingReversedDepthBuffer"));
+            // PS_GetNormalsLayerBuffer (0x27680): "mov eax,[texture]; ret" too. The A16B16G16R16F target its deferred shaders write
+            // smooth world-space normals into (octahedral .xy); its DeferredLights pass reads them the same way.
+            psNormalsBuffer=reinterpret_cast<PsDepthFn>(GetProcAddress(ps,"PS_GetNormalsLayerBuffer"));
+            wchar_t path[MAX_PATH]{};   // settings\ProperShaders - Base.ini next to its ASI, [Base] ReversedDepthBuffer: used only without the export
+            if(GetModuleFileNameW(ps,path,MAX_PATH)){wchar_t* slash=wcsrchr(path,L'\\');
+                if(slash){*slash=0;std::wstring base=std::wstring(path)+L"\\settings\\ProperShaders - Base.ini";properReversedIni=GetPrivateProfileIntW(L"Base",L"ReversedDepthBuffer",0,base.c_str())!=0;}}
+            if(psDepthBuffer){properDepthState=1;logf("lights: drawn by photo mode over Proper Shaders' depth buffer (reversed depth export %s, ini %d)",psReversedDepth?"found":"missing",properReversedIni?1:0);}
+            else log("lights: Proper Shaders has no PS_GetDepthBuffer; lights go through CPointLights");
+        }
+    }
+    return properDepthState>0;
+}
+bool shaderLights(){return properDepthReady()&&!shaderLightsBroken;}
+bool properReversedDepth(){return psReversedDepth?(psReversedDepth()&0xFF)!=0:properReversedIni;}
+// ---------- without Proper: the game's light list ----------
 // Ours go to the front of CPointLights::aLights (0xC3F0E0, 0x30 bytes each): with many street lamps in view a renderer that only
 // takes the first few lights dropped them at some camera angles. Last frame's copies are found by content and taken out first.
 constexpr uintptr_t POINT_LIGHT_ARRAY=0xC3F0E0;constexpr size_t POINT_LIGHT_SIZE=0x30,POINT_LIGHT_KEY=0x2B;
@@ -531,12 +609,14 @@ void addPhotoLights(){
         bool ours=false;for(unsigned j=0;j<ourLightsCount&&!ours;++j)ours=std::memcmp(arr+i*POINT_LIGHT_SIZE,lastOurLights[j],POINT_LIGHT_KEY)==0;
         if(!ours){++i;continue;}
         std::memmove(arr+i*POINT_LIGHT_SIZE,arr+(i+1)*POINT_LIGHT_SIZE,(count-i-1)*POINT_LIGHT_SIZE);--count;}
+    ourLightsCount=0;lastLightTotal=count;
+    if(shaderLights())return;   // drawn by drawPhotoLightsPass instead
     unsigned wanted=0;for(const PhotoLight& l:photoLights)if(l.on&&(l.placed||l.type==2))++wanted;
     while(count&&count+wanted>32){   // full list (lamps, headlights): the game light farthest from the camera gives up its slot
         unsigned farthest=0;float best=-1;
         for(unsigned i=0;i<count;++i){float d=length(sub(*reinterpret_cast<Vec3*>(arr+i*POINT_LIGHT_SIZE),pose.pos));if(d>best){best=d;farthest=i;}}
         std::memmove(arr+farthest*POINT_LIGHT_SIZE,arr+(farthest+1)*POINT_LIGHT_SIZE,(count-farthest-1)*POINT_LIGHT_SIZE);--count;}
-    ourLightsBase=count;ourLightsCount=0;
+    ourLightsBase=count;
     for(const PhotoLight& l:photoLights){
         if(!l.on||count>=32||(!l.placed&&l.type!=2))continue;
         const LightColor& c=lightColors[l.color];float k=l.intensity/100.f*1.6f;
@@ -593,6 +673,32 @@ void clearCjPose(){
 }
 float headBoneX(void* clump){BYTE* h=reinterpret_cast<BYTE*>(reinterpret_cast<void* (__cdecl*)(void*)>(FN_HIERARCHY_FROM_SKIN_CLUMP)(clump));if(!h)return 0;
     int nodes=mem<int>(reinterpret_cast<uintptr_t>(h)+4);BYTE* m=mem<BYTE*>(reinterpret_cast<uintptr_t>(h)+8);if(!m||nodes<9)return 0;return *reinterpret_cast<float*>(m+8*64+0x30);}
+// ---------- weapon in hand (COMPONER > Arma en la mano) ----------
+// CPed::AddWeaponModel / RemoveWeaponModel (0x5E5ED0 / 0x5E3990, thiscall with one argument: both end in ret 4) swap only the
+// model in CJ's hand; the weapon's model id comes from CWeaponInfo::GetWeaponInfo (0x743C60, cdecl) +0x0C and is streamed in
+// first. The model he was holding (CPed+0x740) comes back on exit or with "Sin cambio".
+constexpr uintptr_t FN_ADD_WEAPON_MODEL=0x5E5ED0,FN_REMOVE_WEAPON_MODEL=0x5E3990,FN_WEAPON_INFO=0x743C60,PED_WEAPON_MODEL=0x740;
+int appliedWeaponChoice=0,originalWeaponModel=-1;bool weaponTouched=false;
+void setHandModel(BYTE* ped,int model){
+    int& current=*reinterpret_cast<int*>(ped+PED_WEAPON_MODEL);
+    if(current==model)return;
+    if(current>0)reinterpret_cast<void (__thiscall*)(void*,int)>(FN_REMOVE_WEAPON_MODEL)(ped,current);
+    if(model>0){reinterpret_cast<void (__cdecl*)(int,int)>(FN_REQUEST_MODEL)(model,0x2);reinterpret_cast<void (__cdecl*)(bool)>(FN_LOAD_REQUESTED)(false);
+        reinterpret_cast<void (__thiscall*)(void*,int)>(FN_ADD_WEAPON_MODEL)(ped,model);}
+}
+void applyHandWeapon(){
+    int want=std::clamp(menu.choice(IT_WEAPON),0,WEAPON_CHOICE_COUNT-1);if(want==appliedWeaponChoice)return;
+    BYTE* ped=playerPed();if(!ped)return;
+    if(!weaponTouched){originalWeaponModel=*reinterpret_cast<int*>(ped+PED_WEAPON_MODEL);weaponTouched=true;}
+    int type=weaponChoices[want].type,model=originalWeaponModel;
+    if(type==0)model=-1;
+    else if(type>0){BYTE* info=reinterpret_cast<BYTE*>(reinterpret_cast<void* (__cdecl*)(int,int)>(FN_WEAPON_INFO)(type,1));model=info?*reinterpret_cast<int*>(info+0x0C):-1;}
+    setHandModel(ped,model);appliedWeaponChoice=want;logf("weapon in hand: %s (model %d)",weaponChoices[want].label,model);
+}
+void restoreHandWeapon(){
+    if(weaponTouched){if(BYTE* ped=playerPed())setHandModel(ped,originalWeaponModel);}
+    weaponTouched=false;appliedWeaponChoice=0;originalWeaponModel=-1;
+}
 // ---------- CJ expression (COMPONER > Expresión) ----------
 // A facial animation from ped.ifp added on top as a partial animation (flags partial | looped | started), frozen at its middle.
 BYTE* expressionAssoc=nullptr;int appliedExpression=0;
@@ -618,7 +724,7 @@ void applyCjExpression(){
 // so its lowest bone sits just above the ground under CJ (CWorld::FindGroundZFor3DCoord 0x5696C0). Knocked out (crckdeth2) too.
 constexpr uintptr_t FN_FIND_GROUND_Z=0x5696C0;
 void settlePoseOnGround(uintptr_t ped,void* clump){
-    if(!appliedPoseIndex||!poseAssoc)return;const char* a=poseDefs[appliedPoseIndex].anim;if(!std::strstr(a,"Sit")&&!std::strstr(a,"Lay_")&&!std::strstr(a,"crckdeth"))return;
+    if(!appliedPoseIndex||!poseAssoc)return;if(appliedPoseIndex>=poseCount())return;const PoseDef& pd=poseList[appliedPoseIndex];const char* a=pd.anim;if(!pd.ground&&!std::strstr(a,"Sit")&&!std::strstr(a,"Lay_")&&!std::strstr(a,"crckdeth")&&!std::strstr(a,"crouch"))return;   // crouched firing/reloading too
     BYTE* h=reinterpret_cast<BYTE*>(reinterpret_cast<void* (__cdecl*)(void*)>(FN_HIERARCHY_FROM_SKIN_CLUMP)(clump));if(!h)return;
     int nodes=mem<int>(reinterpret_cast<uintptr_t>(h)+4);BYTE* mats=mem<BYTE*>(reinterpret_cast<uintptr_t>(h)+8);if(nodes<=0||nodes>128||!mats)return;
     float lowest=1e9f;for(int i=0;i<nodes;++i)lowest=std::min(lowest,*reinterpret_cast<float*>(mats+i*64+0x38));
@@ -639,13 +745,13 @@ void rebuildCjSkeleton(){
     logf("pose rebuild: bone 8 x %.3f -> %.3f, saved=%d, CJ visits so far %u, restores %u",before,headBoneX(clump),savedSkeletons.count(key)?1:0,cjRefreshVisits,cjRestores);
 }
 void applyCjPose(){
-    int want=std::clamp(menu.choice(IT_POSE),0,POSE_COUNT-1);float frame=menu.value[IT_POSE_FRAME];
+    int want=std::clamp(menu.choice(IT_POSE),0,poseCount()-1);float frame=menu.value[IT_POSE_FRAME];
     if(want==appliedPoseIndex&&frame==appliedPoseFrame)return;
     void* clump=playerClump();if(!clump)return;
     if(want!=appliedPoseIndex){
         clearCjPose();
         if(want>0){
-            const PoseDef& d=poseDefs[want];
+            const PoseDef& d=poseList[want];
             int block=reinterpret_cast<int (__cdecl*)(const char*)>(FN_ANIM_BLOCK_INDEX)(d.block);
             BYTE* blockData=block>=0?animBlock(d.block):nullptr;int streamBase=ifpStreamBase();
             if(blockData&&!blockData[0x10]&&streamBase>=0){reinterpret_cast<void (__cdecl*)(int,int)>(FN_REQUEST_MODEL)(streamBase+block,0x8);reinterpret_cast<void (__cdecl*)(bool)>(FN_LOAD_REQUESTED)(false);}
@@ -675,14 +781,14 @@ void phase2Open(){
     std::memcpy(clockSnapshot,reinterpret_cast<void*>(CLOCK_BLOCK),CLOCK_BLOCK_SIZE);std::memcpy(weatherSnapshot,reinterpret_cast<void*>(WEATHER_BLOCK),WEATHER_BLOCK_SIZE);
     clockChanged=weatherChanged=false;appliedTime=-1;appliedWeather=0;playerHidden=false;slowmoActive=false;
     // Time, weather and slow motion always start from the live game; the look (FX, grid, frame, logo) is remembered.
-    menu.value[IT_TIME]=-0.5f;menu.value[IT_WEATHER]=0;menu.value[IT_SLOWMO]=0;menu.value[IT_POSE]=0;menu.value[IT_POSE_FRAME]=50;appliedPoseIndex=0;appliedPoseFrame=50;clearLights();menu.value[IT_LIGHT_SLOT]=0;frameStepState=0;menu.value[IT_HIDE_PEOPLE]=0;menu.value[IT_EXPRESSION]=0;menu.value[IT_LOOK_AT]=0;appliedExpression=0;expressionAssoc=nullptr;orbitReady=false;cutsceneCameraFree=inCutsceneSession&&menu.choice(IT_CUTSCENE_CAMERA)==1&&mem<int>(CURRENT_AREA)==0;
+    menu.value[IT_TIME]=-0.5f;menu.value[IT_WEATHER]=0;menu.value[IT_SLOWMO]=0;menu.value[IT_POSE]=0;menu.value[IT_POSE_FRAME]=50;appliedPoseIndex=0;appliedPoseFrame=50;clearLights();ourLightsCount=0;lightNear=lightFar=0;lightPassLogged=false;menu.value[IT_LIGHT_SLOT]=0;frameStepState=0;menu.value[IT_HIDE_PEOPLE]=0;menu.value[IT_EXPRESSION]=0;menu.value[IT_LOOK_AT]=0;appliedExpression=0;expressionAssoc=nullptr;orbitReady=false;cutsceneCameraFree=inCutsceneSession&&menu.choice(IT_CUTSCENE_CAMERA)==1&&mem<int>(CURRENT_AREA)==0;
     menu.open=false;viewing=false;confirmDelete=false;uiHidden=false;mouseCentered=false;scanLogos();setupSkyGfxRow();musicStart();sessionOpenedAt=GetTickCount64();passiveProbeStep=0;patchPauseChecks(true);pauseSleekFootIk(true);
     fixPedPoses=GetPrivateProfileIntW(L"PhotoMode",L"FixPedPoses",1,ini)!=0;
     pedPoseTiming=static_cast<int>(GetPrivateProfileIntW(L"Diag",L"PedPoseTiming",1,ini));
 }
 void phase2Close(){
     if(frameStepState==2&&inCutsceneSession)holdCutscene(true);frameStepState=0;clearLights();
-    applyHidePeople(false);clearCjExpression();
+    applyHidePeople(false);clearCjExpression();restoreHandWeapon();menu.value[IT_WEAPON]=0;
     clearCjPose();
     restoreSkyGfx();
     freezeAnimations(false);
@@ -847,7 +953,7 @@ void phase2Frame(){
     speed=menu.value[IT_MOVE_SPEED];lookSpeed=menu.value[IT_LOOK_SPEED];maxDistance=menu.value[IT_MAX_DISTANCE];collision=menu.on(IT_COLLISION);invertY=menu.on(IT_INVERT_Y);
     syncLightMenu();
     applyHidePeople(menu.on(IT_HIDE_PEOPLE));
-    applyTimeAndWeather();applyHidePlayer();applySlowmo();if(!slowmoActive){applyCjPose();applyCjExpression();poseNoticeShown=-1;}
+    applyTimeAndWeather();applyHidePlayer();applySlowmo();if(!slowmoActive){applyCjPose();applyCjExpression();applyHandWeapon();poseNoticeShown=-1;}
     else if(menu.choice(IT_POSE)!=appliedPoseIndex&&menu.choice(IT_POSE)!=poseNoticeShown){poseNoticeShown=menu.choice(IT_POSE);noticeFor("Las poses necesitan Tiempo: Congelado");}   // slow motion keeps animating CJ
     lookAtCamera=menu.on(IT_LOOK_AT);cameraOrbit=menu.choice(IT_CAMERA_MODE)==1;freezeAnimations(!slowmoActive&&animFreezeAllowed);bypassAnimCallHooks(!slowmoActive&&animFreezeAllowed);passiveFlyingProbe();
     if(!slowmoActive&&pedPoseTiming==0)refreshPedPoses();   // old timing, kept only for A/B diagnostics
@@ -862,6 +968,123 @@ const char* fxVertexSource=R"(
 float4 offset : register(c0);   // half-pixel shift in clip space
 struct Out { float4 pos : POSITION; float2 uv : TEXCOORD0; };
 Out main(float4 pos : POSITION, float2 uv : TEXCOORD0) { Out o; o.pos = float4(pos.xy + offset.xy, 0, 1); o.uv = uv; return o; }
+)";
+// Photo lights over Proper Shaders' depth buffer (drawPhotoLightsPass). Camera space: x right, y up, z forward, metres.
+// lightCommon is shared by the shadow pass (shadowMain) and the light pass (lightMain).
+const char* lightCommon=R"(
+sampler2D scene : register(s0);
+sampler2D depthTex : register(s1);
+sampler2D shadowMask : register(s2);
+float4 view : register(c0);       // depth texel size (xy), tangent of the half FOV: horizontal (z), vertical (w)
+float4 planes : register(c1);     // near, far, reversed depth (1), number of lights
+float4 lights[9] : register(c2);  // per light: position + range | colour * intensity + type (0 point, 1 spot, 2 flash) | direction + cos(cone)
+float4 shadows : register(c11);   // shadows on (1), blur radius in pixels, mask texel size (zw)
+float4 camRight : register(c12);  // the photo camera's axes in world space; camRight.w = Proper's normals buffer is bound (1)
+float4 camUp : register(c13);
+float4 camForward : register(c14);
+sampler2D normalsTex : register(s3);
+float hardwareZ(float2 uv) {
+    float d = tex2Dlod(depthTex, float4(uv, 0, 0)).r;
+    return planes.z > 0.5 ? 1 - d : d;
+}
+// RenderWare's projection: d = f/(f-n) * (1 - n/z)
+float viewZ(float2 uv) { return planes.x * planes.y / (planes.y - hardwareZ(uv) * (planes.y - planes.x)); }
+float3 viewPos(float2 uv) {
+    float z = viewZ(uv);
+    return float3((uv.x * 2 - 1) * view.z * z, (1 - uv.y * 2) * view.w * z, z);
+}
+// Normal from the neighbouring depths, on each axis the side closer in depth (no smearing across object edges), facing the camera.
+float3 viewNormal(float2 uv, float3 p) {
+    float3 x1 = viewPos(uv + float2(view.x, 0)) - p, x0 = p - viewPos(uv - float2(view.x, 0));
+    float3 y1 = viewPos(uv + float2(0, view.y)) - p, y0 = p - viewPos(uv - float2(0, view.y));
+    float3 dx = abs(x1.z) < abs(x0.z) ? x1 : x0, dy = abs(y1.z) < abs(y0.z) ? y1 : y0;
+    float3 n = cross(dy, dx); float n2 = dot(n, n);
+    n = n2 > 1e-14 ? n * rsqrt(n2) : -normalize(p);
+    return dot(n, p) > 0 ? -n : n;
+}
+// Smooth normal from Proper's normals buffer (what its own DeferredLights reads): world space, octahedral in .xy (x*2-1).
+// Falls back to the depth normal without the buffer or where it points away from the camera (nothing deferred drawn there).
+float3 smoothNormal(float2 uv, float3 p, float3 geo) {
+    float2 e = tex2Dlod(normalsTex, float4(uv, 0, 0)).xy * 2 - 1;
+    float3 w = float3(e, 1 - abs(e.x) - abs(e.y));
+    float t = saturate(-w.z);
+    w.xy += w.xy >= 0 ? -t : t;
+    w = normalize(w);
+    float3 v = float3(dot(w, camRight.xyz), dot(w, camUp.xyz), dot(w, camForward.xyz));
+    return camRight.w > 0.5 && dot(v, -normalize(p)) > -0.3 ? v : geo;
+}
+bool isSky(float2 uv) { return hardwareZ(uv) > 0.999999 || viewZ(uv) > planes.y * 0.98; }   // nothing was drawn there
+)";
+// Screen-space shadows: from each pixel a ray is marched toward every light (32 steps, packed next to the surface for contact
+// shadows, jittered per pixel). A step that lands behind what the depth buffer shows there, but less than an object's thickness
+// behind it, is blocked. Whatever is on screen casts (CJ, cars, poles, walls); things off screen cannot. Visibility per light goes
+// to the mask's R, G and B.
+const char* shadowMain=R"(
+float rayVisibility(float3 o, float3 target, float jitter) {
+    float3 ray = target - o;
+    [loop] for (int s = 0; s < 32; ++s) {
+        float t = (s + jitter) / 32.0; t *= t * 0.97;   // stop short of the light itself
+        float3 q = o + ray * t;
+        if (q.z < planes.x) break;
+        float2 suv = float2(q.x / (q.z * view.z) * 0.5 + 0.5, 0.5 - q.y / (q.z * view.w) * 0.5);
+        if (suv.x < 0 || suv.y < 0 || suv.x > 1 || suv.y > 1) break;
+        float behind = q.z - viewZ(suv);
+        if (behind > 0.02 + 0.004 * q.z && behind < 0.45 + 0.015 * q.z && t * length(ray) > 0.05 + 0.006 * q.z) return 0;   // not its own triangle
+    }
+    return 1;
+}
+float4 main(float2 uv : TEXCOORD0) : COLOR0 {
+    if (isSky(uv)) return 1;
+    float3 p = viewPos(uv), g = viewNormal(uv, p), n = smoothNormal(uv, p, g);
+    float2 px = uv / view.xy;
+    float jitter = frac(52.9829189 * frac(dot(px, float2(0.06711056, 0.00583715))));
+    float3 o = p + g * (0.02 + 0.003 * p.z), vis = 1;   // pushed off the actual triangle
+    [unroll] for (int i = 0; i < 3; ++i) {
+        float3 v = lights[i * 3].xyz - p;
+        if (i < planes.w && dot(v, v) < lights[i * 3].w * lights[i * 3].w && dot(n, v) > -0.2 * length(v)) {
+            // Shadow terminator: where the light only grazes the smooth surface, low-poly triangles would shadow their
+            // neighbours, so the shadow fades out there (that side is dim anyway).
+            float graze = saturate(dot(n, normalize(v)) * 4);
+            vis[i] = lerp(1, rayVisibility(o, lights[i * 3].xyz, jitter), graze);
+        }
+    }
+    return float4(vis, 1);
+}
+)";
+const char* lightMain=R"(
+// The mask, blurred with 12 taps that only mix pixels at a similar depth: soft edges without bleeding across objects.
+float3 softShadow(float2 uv, float z) {
+    static const float2 taps[12] = {float2(-0.326, -0.406), float2(-0.840, -0.074), float2(-0.696, 0.457), float2(-0.203, 0.621),
+        float2(0.962, -0.195), float2(0.473, -0.480), float2(0.519, 0.767), float2(0.185, -0.893), float2(0.507, 0.064),
+        float2(0.896, 0.412), float2(-0.322, -0.933), float2(-0.792, -0.598)};
+    float3 sum = tex2Dlod(shadowMask, float4(uv, 0, 0)).rgb; float weight = 1;
+    [unroll] for (int k = 0; k < 12; ++k) {
+        float2 t = uv + taps[k] * shadows.zw * shadows.y;
+        float w = saturate(1 - abs(viewZ(t) - z) / (0.04 + 0.03 * z));
+        sum += tex2Dlod(shadowMask, float4(t, 0, 0)).rgb * w; weight += w;
+    }
+    return sum / weight;
+}
+float4 main(float2 uv : TEXCOORD0) : COLOR0 {
+    float3 c = tex2Dlod(scene, float4(uv, 0, 0)).rgb;
+    if (isSky(uv)) return float4(c, 1);
+    float3 p = viewPos(uv), n = smoothNormal(uv, p, viewNormal(uv, p));
+    float3 vis = shadows.x > 0.5 ? softShadow(uv, p.z) : 1;
+    float3 light = 0;
+    [unroll] for (int i = 0; i < 3; ++i) {
+        if (i < planes.w) {
+            float4 a = lights[i * 3], b = lights[i * 3 + 1], e = lights[i * 3 + 2];
+            float3 v = a.xyz - p; float dist = length(v); float3 l = v / max(dist, 0.001);
+            float r = dist / a.w, win = saturate(1 - r * r * r * r);
+            float fall = win * win / (1 + 4 * r * r);                 // full next to the light, smoothly nothing at its range
+            float cone = b.w > 0.5 ? smoothstep(e.w, lerp(e.w, 1, 0.45), dot(-l, e.xyz)) : 1;
+            float facing = saturate((dot(n, l) + 0.2) / 1.2);        // a little wrap so rebuilt normals never look harsh
+            light += b.rgb * fall * cone * facing * vis[i];
+        }
+    }
+    float3 surface = saturate(c * 2.2 + 0.1);   // brighter surfaces take more of the light and keep their own tint
+    return float4(saturate(c + surface * light), 1);
+}
 )";
 const char* fxSource=R"(
 sampler2D scene : register(s0);
@@ -997,7 +1220,7 @@ float4 main(float2 uv0 : TEXCOORD0) : COLOR0 {
     return float4(saturate(c), 1);
 }
 )";
-IDirect3DPixelShader9* fxShader=nullptr;IDirect3DVertexShader9* fxVertex=nullptr;bool fxTried=false;IDirect3DTexture9* sceneTex=nullptr;UINT sceneW=0,sceneH=0;D3DFORMAT sceneFmt=D3DFMT_UNKNOWN;
+IDirect3DPixelShader9* fxShader=nullptr;IDirect3DPixelShader9* lightShader=nullptr;IDirect3DPixelShader9* shadowShader=nullptr;IDirect3DVertexShader9* fxVertex=nullptr;bool fxTried=false;IDirect3DTexture9* sceneTex=nullptr;UINT sceneW=0,sceneH=0;D3DFORMAT sceneFmt=D3DFMT_UNKNOWN;
 void compileFx(IDirect3DDevice9* dev){
     fxTried=true;HMODULE c=LoadLibraryW(L"d3dcompiler_47.dll");if(!c)c=LoadLibraryW(L"d3dcompiler_43.dll");
     auto compile=c?reinterpret_cast<D3DCompileFn>(GetProcAddress(c,"D3DCompile")):nullptr;
@@ -1007,26 +1230,104 @@ void compileFx(IDirect3DDevice9* dev){
     if(FAILED(hr)||!code){logf("post FX compile failed %08lX: %s",static_cast<unsigned long>(hr),errors?static_cast<const char*>(static_cast<Blob*>(errors)->GetBufferPointer()):"");}
     else if(FAILED(dev->CreatePixelShader(static_cast<const DWORD*>(static_cast<Blob*>(code)->GetBufferPointer()),&fxShader)))log("post FX shader rejected by device");
     if(code)code->Release();if(errors)errors->Release();code=errors=nullptr;
+    auto lightPs=[&](const char* body,const char* name,IDirect3DPixelShader9** out){   // lightCommon + body
+        std::string src=std::string(lightCommon)+body;IUnknown* bin=nullptr;IUnknown* err=nullptr;
+        HRESULT r=compile(src.c_str(),src.size(),name,nullptr,nullptr,"main","ps_3_0",0,0,&bin,&err);
+        if(FAILED(r)||!bin)logf("%s compile failed %08lX: %s",name,static_cast<unsigned long>(r),err?static_cast<const char*>(static_cast<Blob*>(err)->GetBufferPointer()):"");
+        else if(FAILED(dev->CreatePixelShader(static_cast<const DWORD*>(static_cast<Blob*>(bin)->GetBufferPointer()),out)))logf("%s rejected by device",name);
+        if(bin)bin->Release();if(err)err->Release();};
+    lightPs(lightMain,"photolights",&lightShader);lightPs(shadowMain,"photoshadows",&shadowShader);
     hr=compile(fxVertexSource,std::strlen(fxVertexSource),"photofx_vs",nullptr,nullptr,"main","vs_3_0",0,0,&code,&errors);
     if(FAILED(hr)||!code||FAILED(dev->CreateVertexShader(static_cast<const DWORD*>(static_cast<Blob*>(code)->GetBufferPointer()),&fxVertex))){
-        logf("post FX vertex shader failed %08lX",static_cast<unsigned long>(hr));if(fxShader){fxShader->Release();fxShader=nullptr;}}
-    else log("post FX shaders ready (vs_3_0 + ps_3_0)");
+        logf("post FX vertex shader failed %08lX",static_cast<unsigned long>(hr));
+        for(IDirect3DPixelShader9** s:{&fxShader,&lightShader,&shadowShader})if(*s){(*s)->Release();*s=nullptr;}}
+    else logf("post FX shaders ready (vs_3_0 + ps_3_0, light shader %s, shadow shader %s)",lightShader?"ready":"missing",shadowShader?"ready":"missing");
     if(code)code->Release();if(errors)errors->Release();
 }
-void releaseDefaultPool(){if(sceneTex){sceneTex->Release();sceneTex=nullptr;}sceneW=sceneH=0;}
+IDirect3DTexture9* shadowTex=nullptr;   // the shadow pass's visibility per light (R, G, B), at the back buffer's size
+void releaseDefaultPool(){if(sceneTex){sceneTex->Release();sceneTex=nullptr;}sceneW=sceneH=0;if(shadowTex){shadowTex->Release();shadowTex=nullptr;}}
+// The finished frame copied into sceneTex, which the post passes read while they draw over the back buffer.
+bool copySceneTex(IDirect3DDevice9* dev,IDirect3DSurface9* back,const D3DSURFACE_DESC& d){
+    if(!sceneTex||sceneW!=d.Width||sceneH!=d.Height||sceneFmt!=d.Format){
+        releaseDefaultPool();
+        if(FAILED(dev->CreateTexture(d.Width,d.Height,1,D3DUSAGE_RENDERTARGET,d.Format,D3DPOOL_DEFAULT,&sceneTex,nullptr))){sceneTex=nullptr;return false;}
+        sceneW=d.Width;sceneH=d.Height;sceneFmt=d.Format;
+    }
+    IDirect3DSurface9* dst=nullptr;if(FAILED(sceneTex->GetSurfaceLevel(0,&dst)))return false;
+    HRESULT hr=dev->StretchRect(back,nullptr,dst,nullptr,D3DTEXF_NONE);dst->Release();return SUCCEEDED(hr);
+}
+void drawClipQuad(IDirect3DDevice9* dev){
+    struct ClipVertex{float x,y,z,u,v;};ClipVertex q[4]={{-1,1,0,0,0},{1,1,0,1,0},{-1,-1,0,0,1},{1,-1,0,1,1}};
+    dev->SetFVF(D3DFVF_XYZ|D3DFVF_TEX1);dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,q,sizeof(ClipVertex));
+}
+// ---------- photo lights drawn by the photo mode (with Proper Shaders) ----------
+// Each pixel's camera-space position: z from Proper's depth buffer and the main camera's near/far planes (RenderWare's D3D
+// projection, built at 0x7F8FFF: _33 = far/(far-near), _43 = -_33*near), x and y from the same photo-camera projection the light
+// markers use. A normal is rebuilt from the neighbouring depths and every light adds colour * falloff * cone * facing, scaled by
+// how bright the surface already is. Runs every frame a light is on, right before the photo FX, so photos keep it and the menu
+// never gets lit. The depth texture is read while it may still be the bound depth buffer, so that binding is lifted meanwhile.
+void drawPhotoLightsPass(IDirect3DDevice9* dev,IDirect3DSurface9* back,const D3DSURFACE_DESC& d){
+    if(!shaderLights())return;
+    float w=static_cast<float>(d.Width),h=static_cast<float>(d.Height);
+    Basis b=basis_from_angles(yaw,pitch,roll);float tanV=std::tan(fov*PI/360.f)*0.75f,aspect=w/h;   // as in drawLightMarkers
+    auto toView=[&](Vec3 v){return Vec3{dot(v,b.right),dot(v,b.up),dot(v,b.forward)};};
+    float c[4*(6+3*PHOTO_LIGHTS)]{};int n=0;   // c0 view, c1 planes, c2-c10 lights, c11 shadows, c12-c14 camera axes
+    for(const PhotoLight& l:photoLights){
+        if(!l.on||(!l.placed&&l.type!=2))continue;
+        const LightColor& col=lightColors[l.color];float k=l.intensity/100.f*2.2f;
+        Vec3 at=l.type==2?Vec3{0,0,0.3f}:toView(sub(l.pos,pose.pos)),dir=l.type==2?Vec3{0,0,1}:toView(l.dir);   // the flash rides on the camera
+        dir=length(dir)>0.5f?normalized(dir):Vec3{0,0,1};
+        float* r=c+8+12*n;
+        r[0]=at.x;r[1]=at.y;r[2]=at.z;r[3]=std::max(l.range,0.5f);
+        r[4]=col.r*k;r[5]=col.g*k;r[6]=col.b*k;r[7]=static_cast<float>(l.type);
+        r[8]=dir.x;r[9]=dir.y;r[10]=dir.z;r[11]=std::cos((l.type==2?50.f:36.f)*PI/180.f);   // cone half-angle
+        ++n;}
+    if(!n)return;
+    if(!fxTried)compileFx(dev);
+    if(!lightShader||!fxVertex){shaderLightsBroken=true;log("lights: no light shader; lights go through CPointLights");return;}
+    IDirect3DTexture9* depth=psDepthBuffer();
+    if(!depth){shaderLightsBroken=true;log("lights: Proper Shaders gave no depth buffer; lights go through CPointLights");return;}
+    D3DSURFACE_DESC dd{};if(FAILED(depth->GetLevelDesc(0,&dd))||!dd.Width||!dd.Height)return;
+    BYTE* cam=mem<BYTE*>(RW_CAMERA);float nearZ=lightNear,farZ=lightFar;
+    if(!(nearZ>0&&farZ>nearZ)&&cam){nearZ=*reinterpret_cast<float*>(cam+0x80);farZ=*reinterpret_cast<float*>(cam+0x84);}
+    if(!(nearZ>0&&farZ>nearZ))return;
+    bool reversed=properReversedDepth();
+    if(!lightPassLogged){lightPassLogged=true;
+        logf("lights pass: depth %ux%u fmt %08lX, near %.3f far %.1f, reversed %d, tanH %.4f tanV %.4f (RW view window %.4f %.4f), %d light(s), normals buffer %s",dd.Width,dd.Height,
+            static_cast<unsigned long>(dd.Format),nearZ,farZ,reversed?1:0,tanV*aspect,tanV,cam?*reinterpret_cast<float*>(cam+0x68):0.f,cam?*reinterpret_cast<float*>(cam+0x6C):0.f,n,psNormalsBuffer&&psNormalsBuffer()?"yes":"no");}
+    if(!copySceneTex(dev,back,d))return;
+    c[0]=1.f/static_cast<float>(dd.Width);c[1]=1.f/static_cast<float>(dd.Height);c[2]=tanV*aspect;c[3]=tanV;
+    c[4]=nearZ;c[5]=farZ;c[6]=reversed?1.f:0.f;c[7]=static_cast<float>(n);
+    // LUCES > Sombras: the shadow pass fills shadowTex first (screen-space rays, see shadowMain), the light pass blurs and uses it.
+    bool shadowsOn=menu.on(IT_LIGHT_SHADOWS)&&shadowShader;
+    if(shadowsOn&&!shadowTex&&FAILED(dev->CreateTexture(d.Width,d.Height,1,D3DUSAGE_RENDERTARGET,D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,&shadowTex,nullptr))){shadowTex=nullptr;}
+    IDirect3DSurface9* shadowSurface=nullptr;if(shadowsOn&&(!shadowTex||FAILED(shadowTex->GetSurfaceLevel(0,&shadowSurface))))shadowSurface=nullptr;
+    shadowsOn=shadowSurface!=nullptr;
+    c[44]=shadowsOn?1.f:0.f;c[45]=std::max(2.f,3.5f*h/1080.f);c[46]=1/w;c[47]=1/h;   // blur radius ~3.5 px at 1080p
+    IDirect3DTexture9* normals=psNormalsBuffer?psNormalsBuffer():nullptr;   // smooth normals; without them the depth normals are used
+    Vec3 axes[3]={b.right,b.up,b.forward};for(int i=0;i<3;++i){c[48+4*i]=axes[i].x;c[49+4*i]=axes[i].y;c[50+4*i]=axes[i].z;}
+    c[51]=normals?1.f:0.f;
+    float vc[4]={-1/w,1/h,0,0};
+    IDirect3DSurface9* oldDepth=nullptr;if(FAILED(dev->GetDepthStencilSurface(&oldDepth)))oldDepth=nullptr;dev->SetDepthStencilSurface(nullptr);
+    dev->SetPixelShaderConstantF(0,c,6+3*PHOTO_LIGHTS);dev->SetVertexShaderConstantF(0,vc,1);dev->SetVertexShader(fxVertex);
+    dev->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE);dev->SetRenderState(D3DRS_SRGBWRITEENABLE,FALSE);
+    for(DWORD s=0;s<4;++s){
+        dev->SetSamplerState(s,D3DSAMP_SRGBTEXTURE,FALSE);dev->SetSamplerState(s,D3DSAMP_MINFILTER,D3DTEXF_POINT);dev->SetSamplerState(s,D3DSAMP_MAGFILTER,D3DTEXF_POINT);
+        dev->SetSamplerState(s,D3DSAMP_MIPFILTER,D3DTEXF_NONE);dev->SetSamplerState(s,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);dev->SetSamplerState(s,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);}
+    dev->SetTexture(1,depth);dev->SetTexture(3,normals);
+    if(shadowsOn){dev->SetRenderTarget(0,shadowSurface);dev->SetPixelShader(shadowShader);drawClipQuad(dev);dev->SetRenderTarget(0,back);shadowSurface->Release();}
+    dev->SetPixelShader(lightShader);dev->SetTexture(0,sceneTex);dev->SetTexture(2,shadowsOn?shadowTex:nullptr);
+    drawClipQuad(dev);
+    dev->SetTexture(0,nullptr);dev->SetTexture(1,nullptr);dev->SetTexture(2,nullptr);dev->SetTexture(3,nullptr);dev->SetPixelShader(nullptr);dev->SetVertexShader(nullptr);dev->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE);dev->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);
+    dev->SetDepthStencilSurface(oldDepth);if(oldDepth)oldDepth->Release();
+}
 bool fxNeeded(){
     for(const MenuItem& i:menu.items)if(i.tab==TAB_FX&&i.kind!=KIND_ACTION&&i.id!=IT_TILT_FOCUS&&i.id!=IT_SKYGFX&&menu.value[i.id]!=i.def)return true;
     return false;
 }
 void drawFx(IDirect3DDevice9* dev,IDirect3DSurface9* back,const D3DSURFACE_DESC& d){
     if(!fxTried)compileFx(dev);if(!fxShader)return;
-    if(!sceneTex||sceneW!=d.Width||sceneH!=d.Height||sceneFmt!=d.Format){
-        releaseDefaultPool();
-        if(FAILED(dev->CreateTexture(d.Width,d.Height,1,D3DUSAGE_RENDERTARGET,d.Format,D3DPOOL_DEFAULT,&sceneTex,nullptr))){sceneTex=nullptr;return;}
-        sceneW=d.Width;sceneH=d.Height;sceneFmt=d.Format;
-    }
-    IDirect3DSurface9* dst=nullptr;if(FAILED(sceneTex->GetSurfaceLevel(0,&dst)))return;
-    HRESULT hr=dev->StretchRect(back,nullptr,dst,nullptr,D3DTEXF_NONE);dst->Release();if(FAILED(hr))return;
+    if(!copySceneTex(dev,back,d))return;
     float w=static_cast<float>(d.Width),h=static_cast<float>(d.Height);
     float c[16]={menu.value[IT_EXPOSURE],1+menu.value[IT_CONTRAST]/100.f,1+menu.value[IT_SATURATION]/100.f,menu.value[IT_TEMPERATURE]/100.f,
         menu.value[IT_VIGNETTE]/100.f,menu.value[IT_GRAIN]/100.f,static_cast<float>(GetTickCount64()%10000)/37.f,menu.value[IT_TILT]/100.f,
@@ -1040,15 +1341,15 @@ void drawFx(IDirect3DDevice9* dev,IDirect3DSurface9* back,const D3DSURFACE_DESC&
     dev->SetSamplerState(0,D3DSAMP_SRGBTEXTURE,FALSE);dev->SetRenderState(D3DRS_SRGBWRITEENABLE,FALSE);
     dev->SetTexture(0,sceneTex);dev->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);dev->SetSamplerState(0,D3DSAMP_MAGFILTER,D3DTEXF_LINEAR);
     dev->SetSamplerState(0,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);dev->SetSamplerState(0,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);
-    struct ClipVertex{float x,y,z,u,v;};ClipVertex q[4]={{-1,1,0,0,0},{1,1,0,1,0},{-1,-1,0,0,1},{1,-1,0,1,1}};
-    dev->SetFVF(D3DFVF_XYZ|D3DFVF_TEX1);dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,q,sizeof(ClipVertex));
+    drawClipQuad(dev);
     dev->SetTexture(0,nullptr);dev->SetPixelShader(nullptr);dev->SetVertexShader(nullptr);dev->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE);dev->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);
 }
 Bars currentBars(float w,float h){return letterbox(w,h,frameAspects[std::clamp(menu.choice(IT_FRAME),0,6)]);}
 constexpr int FILTER_CAMCORDER=7;void drawCamcorderStamp(IDirect3DDevice9* dev,float w,float h,Bars bars);   // photo_ui.inc
-// Everything that belongs to the photo: FX, frame bars, logo, the camcorder date stamp.
+// Everything that belongs to the photo: lights, FX, frame bars, logo, the camcorder date stamp.
 void drawPhotoLayers(IDirect3DDevice9* dev,IDirect3DSurface9* back,const D3DSURFACE_DESC& d){
     float w=static_cast<float>(d.Width),h=static_cast<float>(d.Height);
+    drawPhotoLightsPass(dev,back,d);   // first, so blur, bloom and the filters see the light
     if(fxNeeded())drawFx(dev,back,d);
     Bars bars=currentBars(w,h);
     if(bars.top>0){rect(dev,0,0,w,bars.top,0xFF000000);rect(dev,0,h-bars.top,w,bars.top,0xFF000000);}
@@ -1387,8 +1688,8 @@ void autoTest9Frame(unsigned long long now){
     static const Shot shots[]={{1000,0,50},{2000,1,25},{3000,1,75},{4000,11,50},{5000,18,50},{6000,23,50},{7000,24,50},{8000,31,50},{9000,99,50}};
     if(step==0){openMode();log("AUTOTEST9 open");step=1;}
     for(int i=0;i<9;++i){
-        if(step==1+2*i&&t>=shots[i].at){menu.value[IT_POSE]=static_cast<float>(std::min(shots[i].pose,POSE_COUNT-1));menu.value[IT_POSE_FRAME]=shots[i].moment;step++;}
-        if(step==2+2*i&&t>=shots[i].at+500){requestCapture();logf("AUTOTEST9 capture pose %d (%s) at %.0f%%",menu.choice(IT_POSE),poseDefs[menu.choice(IT_POSE)].label,menu.value[IT_POSE_FRAME]);step++;}
+        if(step==1+2*i&&t>=shots[i].at){menu.value[IT_POSE]=static_cast<float>(std::min(shots[i].pose,poseCount()-1));menu.value[IT_POSE_FRAME]=shots[i].moment;step++;}
+        if(step==2+2*i&&t>=shots[i].at+500){requestCapture();logf("AUTOTEST9 capture pose %d (%s) at %.0f%%",menu.choice(IT_POSE),poseList[static_cast<size_t>(menu.choice(IT_POSE))].label,menu.value[IT_POSE_FRAME]);step++;}
     }
     if(step==19&&t>=10000){restore();log("AUTOTEST9 closed with a pose on");step=20;}
     if(step==20&&t>=11500){openMode();menu.value[IT_POSE]=5;log("AUTOTEST9 reopened, pose 5");step=21;}

@@ -12,14 +12,14 @@ enum MenuTab { TAB_COMPOSE, TAB_SETTINGS, TAB_FX, TAB_LIGHTS, TAB_PHOTOS, TAB_CO
 enum ItemKind { KIND_CHOICE, KIND_RANGE, KIND_ACTION };
 enum ItemId {
     // COMPONER
-    IT_GRID, IT_FRAME, IT_HIDE_PLAYER, IT_HIDE_PEOPLE, IT_POSE, IT_POSE_FRAME, IT_EXPRESSION, IT_LOOK_AT, IT_TIME, IT_WEATHER, IT_SLOWMO, IT_NEXT_FRAME, IT_LOGO, IT_LOGO_POS, IT_LOGO_SIZE, IT_PRESET_SLOT, IT_PRESET_SAVE, IT_PRESET_LOAD, IT_CAMERA_MODE,
+    IT_GRID, IT_FRAME, IT_HIDE_PLAYER, IT_HIDE_PEOPLE, IT_POSE, IT_POSE_FRAME, IT_EXPRESSION, IT_LOOK_AT, IT_WEAPON, IT_TIME, IT_WEATHER, IT_SLOWMO, IT_NEXT_FRAME, IT_LOGO, IT_LOGO_POS, IT_LOGO_SIZE, IT_PRESET_SLOT, IT_PRESET_SAVE, IT_PRESET_LOAD, IT_CAMERA_MODE,
     // AJUSTES
     IT_MOVE_SPEED, IT_LOOK_SPEED, IT_INVERT_Y, IT_MAX_DISTANCE, IT_COLLISION, IT_OPEN_BUTTON, IT_MENU_BUTTON, IT_PROMPTS, IT_STATUS, IT_ACCENT, IT_MENU_BG, IT_ICONS,
     IT_SOUNDS, IT_MUSIC, IT_MUSIC_VOLUME, IT_MOUSE_LOOK, IT_LANGUAGE, IT_CUTSCENE_CAMERA, IT_SETTINGS_RESET,
     // EFECTOS
     IT_FILTER, IT_EXPOSURE, IT_CONTRAST, IT_SATURATION, IT_TEMPERATURE, IT_VIGNETTE, IT_GRAIN, IT_TILT, IT_TILT_FOCUS, IT_LENS_DROPS, IT_SKYGFX, IT_CHROMA, IT_BLOOM, IT_DISTORTION, IT_RADIAL_BLUR, IT_HAZE, IT_FX_RESET,
     // LUCES
-    IT_LIGHT_SLOT, IT_LIGHT_TYPE, IT_LIGHT_PLACE, IT_LIGHT_MOVE, IT_LIGHT_MOVE_MODE, IT_LIGHT_ON, IT_LIGHT_COLOR, IT_LIGHT_INTENSITY, IT_LIGHT_RANGE, IT_LIGHT_REMOVE, IT_LIGHT_CLEAR,
+    IT_LIGHT_SLOT, IT_LIGHT_TYPE, IT_LIGHT_PLACE, IT_LIGHT_MOVE, IT_LIGHT_MOVE_MODE, IT_LIGHT_ON, IT_LIGHT_COLOR, IT_LIGHT_INTENSITY, IT_LIGHT_RANGE, IT_LIGHT_SHADOWS, IT_LIGHT_REMOVE, IT_LIGHT_CLEAR,
     IT_COUNT
 };
 struct MenuItem {
@@ -33,7 +33,16 @@ inline const char* const weatherNames[] = {"Sin cambio", "Muy soleado LS", "Sole
     "Muy soleado campo", "Soleado campo", "Nublado campo", "Lluvia campo", "Muy soleado desierto", "Soleado desierto",
     "Tormenta de arena", "Bajo el agua", "Color extra 1", "Color extra 2"};
 // CJ pose library: an animation from the game's IFP blocks, frozen at a chosen point (photo_phase2.inc applies it).
-struct PoseDef { const char* block; const char* anim; const char* label; };
+// COMPONER > Arma en la mano: only the weapon's model goes into CJ's hand for the photo (his inventory is not touched).
+// type is the game's eWeaponType; -1 keeps what he holds, 0 empties the hand.
+struct WeaponChoice { int type; const char* label; };
+inline const WeaponChoice weaponChoices[] = {{-1, "Sin cambio"}, {0, "Ninguna"}, {5, "Bate"}, {4, "Cuchillo"}, {8, "Katana"}, {9, "Motosierra"},
+    {15, "Bastón"}, {14, "Flores"}, {22, "Pistola"}, {23, "Pistola con silenciador"}, {24, "Desert Eagle"}, {25, "Escopeta"},
+    {26, "Recortada"}, {27, "Escopeta de combate"}, {28, "Uzi"}, {32, "Tec-9"}, {29, "MP5"}, {30, "AK-47"}, {31, "M4"},
+    {33, "Rifle"}, {34, "Francotirador"}, {35, "RPG"}, {37, "Lanzallamas"}, {38, "Minigun"}, {41, "Aerosol"}, {43, "Cámara de fotos"}};
+constexpr int WEAPON_CHOICE_COUNT = static_cast<int>(sizeof(weaponChoices) / sizeof(weaponChoices[0]));
+inline std::vector<std::string> weaponNames() { std::vector<std::string> n; for (const WeaponChoice& w : weaponChoices) n.push_back(w.label); return n; }
+struct PoseDef { const char* block; const char* anim; const char* label; bool ground = false; };   // ground: rests on the floor (custom poses)
 inline const PoseDef poseDefs[] = {
     {"", "", "Normal"},
     {"ped", "WALK_gang1", "Caminando (pandilla)"}, {"ped", "WALK_player", "Caminando"}, {"ped", "run_gang1", "Corriendo (pandilla)"},
@@ -46,6 +55,11 @@ inline const PoseDef poseDefs[] = {
     {"shop", "SHP_Gun_Aim", "Apuntando"}, {"camera", "camstnd_idleloop", "Tomando foto"}, {"on_lookers", "point_loop", "Señalando"},
     {"on_lookers", "wave_loop", "Saludando"}, {"on_lookers", "shout_01", "Gritando"}, {"park", "Tai_Chi_Loop", "Tai chi"},
     {"riot", "RIOT_ANGRY", "Enojado"}, {"playidles", "stretch", "Estirándose"}, {"crack", "crckdeth2", "Tirado"},
+    // Aiming and shooting stances from the weapon animation files (upper body; pair them with COMPONER > Arma en la mano).
+    {"ped", "GUN_STAND", "Apuntando con pistola"}, {"colt45", "colt45_fire_2hands", "Pistola a dos manos"},
+    {"colt45", "colt45_crouchfire", "Pistola agachado"}, {"python", "python_fire", "Desert Eagle disparando"},
+    {"python", "python_crouchfire", "Desert Eagle agachado"}, {"uzi", "UZI_fire", "Subfusil disparando"},
+    {"rifle", "RIFLE_fire", "Rifle disparando"}, {"rifle", "RIFLE_crouchfire", "Rifle agachado"},
 };
 // CJ expressions: facial animations from ped.ifp, applied as a partial animation over the pose.
 struct ExpressionDef { const char* anim; const char* label; };
@@ -82,6 +96,7 @@ inline std::vector<MenuItem> makeMenu() {
         {IT_POSE_FRAME, TAB_COMPOSE, KIND_RANGE, "Momento de la pose", "", 0, 100, 5, 50, {}, false},
         {IT_EXPRESSION, TAB_COMPOSE, KIND_CHOICE, "Expresión", "", 0, static_cast<float>(EXPRESSION_COUNT - 1), 1, 0, expressionNames(), false},
         {IT_LOOK_AT, TAB_COMPOSE, KIND_CHOICE, "Mirar a la cámara", "", 0, 1, 1, 0, yesNo, false},
+        {IT_WEAPON, TAB_COMPOSE, KIND_CHOICE, "Arma en la mano", "", 0, static_cast<float>(WEAPON_CHOICE_COUNT - 1), 1, 0, weaponNames(), false},
         {IT_TIME, TAB_COMPOSE, KIND_RANGE, "Hora", "Time", -0.5f, 23.5f, 0.5f, -0.5f, {}, false},
         {IT_WEATHER, TAB_COMPOSE, KIND_CHOICE, "Clima", "Weather", 0, static_cast<float>(weather.size() - 1), 1, 0, weather, false},
         {IT_SLOWMO, TAB_COMPOSE, KIND_CHOICE, "Tiempo", "TimeScale", 0, 4, 1, 0, {"Congelado", "Lento 0.05x", "Lento 0.1x", "Lento 0.25x", "Lento 0.5x"}, false},
@@ -139,6 +154,7 @@ inline std::vector<MenuItem> makeMenu() {
         {IT_LIGHT_COLOR, TAB_LIGHTS, KIND_CHOICE, "Color", "", 0, static_cast<float>(LIGHT_COLOR_COUNT - 1), 1, 0, lightColorNames(), false},
         {IT_LIGHT_INTENSITY, TAB_LIGHTS, KIND_RANGE, "Intensidad", "", 5, 100, 5, 60, {}, false},
         {IT_LIGHT_RANGE, TAB_LIGHTS, KIND_RANGE, "Alcance", "", 2, 40, 1, 10, {}, false},
+        {IT_LIGHT_SHADOWS, TAB_LIGHTS, KIND_CHOICE, "Sombras", "LightShadows", 0, 1, 1, 1, yesNo, false},   // with Proper Shaders only
         {IT_LIGHT_REMOVE, TAB_LIGHTS, KIND_ACTION, "Quitar esta luz", "", 0, 0, 0, 0, {}, false},
         {IT_LIGHT_CLEAR, TAB_LIGHTS, KIND_ACTION, "Quitar todas las luces", "", 0, 0, 0, 0, {}, false},
     };
@@ -238,14 +254,14 @@ inline Box logoBox(float imgW, float imgH, float logoW, float logoH, float sizeP
 struct Translation { const char* es; const char* en; };
 inline const Translation translations[] = {
     {"COMPONER","COMPOSE"},{"AJUSTES","SETTINGS"},{"EFECTOS","PHOTO FX"},{"FOTOS","PHOTOS"},{"LUCES","LIGHTS"},{"Expresión","Expression"},{"Sorprendido","Surprised"},{"Asustado","Scared"},{"Hablando","Talking"},{"Chicle","Chewing gum"},
-    {"Curioso","Curious"},{"Mirar a la cámara","Look at camera"},{"Cámara","Camera"},{"Libre","Free"},{"Orbital","Orbit"},{"Ocultar personas","Hide people"},{"Distorsión de lente","Lens distortion"},{"Desenfoque radial","Radial blur"},{"Neblina","Haze"},
+    {"Curioso","Curious"},{"Arma en la mano","Weapon in hand"},{"Katana","Katana"},{"Desert Eagle","Desert Eagle"},{"Uzi","Uzi"},{"Tec-9","Tec-9"},{"MP5","MP5"},{"AK-47","AK-47"},{"M4","M4"},{"RPG","RPG"},{"Minigun","Minigun"},{"Sin cambio","Unchanged"},{"Ninguna","None"},{"Bate","Bat"},{"Cuchillo","Knife"},{"Motosierra","Chainsaw"},{"Bastón","Cane"},{"Flores","Flowers"},{"Pistola","Pistol"},{"Pistola con silenciador","Silenced pistol"},{"Escopeta","Shotgun"},{"Recortada","Sawn-off"},{"Escopeta de combate","Combat shotgun"},{"Rifle","Rifle"},{"Francotirador","Sniper rifle"},{"Lanzallamas","Flamethrower"},{"Aerosol","Spray can"},{"Cámara de fotos","Camera"},{"Mirar a la cámara","Look at camera"},{"Cámara","Camera"},{"Libre","Free"},{"Orbital","Orbit"},{"Ocultar personas","Hide people"},{"Distorsión de lente","Lens distortion"},{"Desenfoque radial","Radial blur"},{"Neblina","Haze"},
     {"Tipo","Type"},{"Foco redondo","Point light"},{"Reflector","Spotlight"},{"Flash de cámara","Camera flash"},
     {"Siguiente fotograma","Next frame"},{"Cámara libre en cinemáticas","Free camera in cutscenes"},{"Solo exteriores","Outdoors only"},
     {"Aberración cromática","Chromatic aberration"},{"Resplandor","Bloom"},
     {"Luz","Light"},{"Luz 1","Light 1"},{"Luz 2","Light 2"},{"Luz 3","Light 3"},{"Colocar aquí","Place here"},{"Encendida","On"},{"Color","Colour"},
     {"Intensidad","Intensity"},{"Alcance","Range"},{"Quitar todas las luces","Remove all lights"},
     {"Blanco cálido","Warm white"},{"Blanco frío","Cool white"},{"Azul","Blue"},{"Verde","Green"},{"Naranja","Orange"},{"Morado","Purple"},{"Rosa","Pink"},{"Amarillo","Yellow"},
-    {"Luz colocada","Light placed"},{"Las poses necesitan Tiempo: Congelado","Poses need Time: Frozen"},{"Mover luz","Move light"},{"Modo de movimiento","Move mode"},{"Alrededor de CJ","Around CJ"},{"Quitar esta luz","Remove this light"},{"Luz quitada","Light removed"},{"Mueve la luz con el stick o WASD, gírala con la cámara. X / Enter la suelta","Move the light with the stick or WASD, aim it with the look controls. X / Enter drops it"},{"Pulsa Derecha","Press Right"},{"Moviendo","Moving"},{"Luces quitadas","Lights removed"},{"Primero coloca la luz","Place the light first"},
+    {"Luz colocada","Light placed"},{"Las poses necesitan Tiempo: Congelado","Poses need Time: Frozen"},{"Mover luz","Move light"},{"Modo de movimiento","Move mode"},{"Alrededor de CJ","Around CJ"},{"Quitar esta luz","Remove this light"},{"Sombras","Shadows"},{"Luz quitada","Light removed"},{"Mueve la luz con el stick o WASD, gírala con la cámara. X / Enter la suelta","Move the light with the stick or WASD, aim it with the look controls. X / Enter drops it"},{"Pulsa Derecha","Press Right"},{"Moviendo","Moving"},{"Luces quitadas","Lights removed"},{"Primero coloca la luz","Place the light first"},
     {"Rejilla","Grid"},{"Tercios","Thirds"},{"Cuadrícula","Squares"},{"Centro","Centre"},{"Diagonales","Diagonals"},
     {"Marco","Frame"},{"2.39:1 cine","2.39:1 cinema"},{"1.85:1","1.85:1"},{"16:9","16:9"},{"4:3","4:3"},{"1:1","1:1"},{"4:5 vertical","4:5 portrait"},
     {"Ocultar a CJ","Hide CJ"},{"No","Off"},{"Sí","On"},{"Hora","Time of day"},{"Sin cambio","Unchanged"},
@@ -275,7 +291,7 @@ inline const Translation translations[] = {
     {"Seña de pandilla 3","Gang sign 3"},{"Platicando","Chatting"},{"Recargado","Leaning"},{"Fumando","Smoking"},{"Fumando recargado","Smoking, leaning"},
     {"Sentado","Sitting"},{"Acostado","Lying down"},{"Bailando 1","Dancing 1"},{"Bailando 2","Dancing 2"},{"Rapeando","Rapping"},{"Apuntando","Aiming"},
     {"Tomando foto","Taking a photo"},{"Señalando","Pointing"},{"Saludando","Waving"},{"Gritando","Shouting"},{"Tai chi","Tai chi"},{"Enojado","Angry"},
-    {"Estirándose","Stretching"},{"Tirado","Knocked out"},{"Esa pose no está disponible","That pose is not available"},{"Custom 2","Custom 2"},{"Custom 3","Custom 3"},
+    {"Estirándose","Stretching"},{"Tirado","Knocked out"},{"Apuntando con pistola","Aiming a pistol"},{"Pistola a dos manos","Pistol, two hands"},{"Pistola agachado","Pistol, crouched"},{"Desert Eagle disparando","Desert Eagle firing"},{"Desert Eagle agachado","Desert Eagle, crouched"},{"Subfusil disparando","SMG firing"},{"Rifle disparando","Rifle firing"},{"Rifle agachado","Rifle, crouched"},{"Esa pose no está disponible","That pose is not available"},{"Custom 2","Custom 2"},{"Custom 3","Custom 3"},
     // interface
     {"Modo foto","Photo Mode"},{"Pestañas","Tabs"},{"Ajustar","Adjust"},{"Ocultar","Hide"},{"Cerrar","Close"},{"Elegir","Browse"},{"Ver","View"},{"Borrar","Delete"},{"Carpeta","Folder"},
     {"Pulsa X","Press X"},{"Pulsa Enter","Press Enter"},{"Todavía no hay fotos. Toma una con X.","No photos yet. Take one with X."},
