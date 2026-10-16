@@ -60,3 +60,5 @@ inline Vec3 limited_look(Vec3 bodyFacing, Vec3 toTarget, float maxYaw, float max
     float pitch = std::clamp(std::atan2(t.z, std::sqrt(t.x * t.x + t.y * t.y)), -maxPitch, maxPitch);
     float a = bodyYaw + yaw; return {std::cos(pitch) * std::cos(a), std::cos(pitch) * std::sin(a), std::sin(pitch)};
 }
+// Zoom (FOV): proportional steps, so it stays usable down to telephoto 5 degrees (70 degrees moves about 35 per second).
+inline float zoomFov(float fov, float amount) { return std::clamp(fov * std::exp(-amount * 0.5f), 5.f, 100.f); }

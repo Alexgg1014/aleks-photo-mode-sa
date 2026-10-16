@@ -21,7 +21,7 @@ All shots taken in game with the mod. No editing.
 
 ## Features
 
-- **Free camera** with collision, roll and zoom, plus an **orbit camera** around CJ.
+- **Free camera** with collision, roll and zoom (down to FOV 5 for telephoto shots), plus an **orbit camera** around CJ.
 - **CJ poses** (39) with a pose-moment slider, including aiming and firing stances. Sitting, lying, knocked out and crouched poses rest on the ground. Add your own animations under `[CustomPoses]` in the INI.
 - **Weapon in hand**: put any of 24 weapons in CJ's hand for the photo without touching his inventory.
 - **Expressions** and **Look at camera** (his head follows the camera).
@@ -29,10 +29,11 @@ All shots taken in game with the mod. No editing.
 - **Time of day and weather**: everything goes back to normal when you exit.
 - **Slow motion** and **next frame**: step the world one frame at a time.
 - **Cutscene support**: camera locked and time frozen, with a free camera in outdoor cutscenes.
-- **Lights**: up to 3 point lights, spotlights or a camera flash. **Move light** moves and aims a light while the camera stays put (like Alan Wake 2's portrait spot), or orbits it around CJ. With Proper Shaders the mod draws the lights itself, with **shadows** and smooth shading. Without Proper they go through the game's own lights.
-- **Photo FX**: filters (B&W, sepia, cold, warm, vintage, Polaroid, 90s camcorder), exposure, contrast, saturation, temperature, vignette, grain, tilt-shift, lens drops, chromatic aberration, bloom, lens distortion, radial blur and haze.
+- **Lights**: up to 3 point lights, spotlights or a camera flash. **Move light** moves and aims a light while the camera stays put (like Alan Wake 2's portrait spot), or orbits it around CJ. With Proper Shaders the mod draws the lights itself, with **shadows** and smooth shading. Without Proper they go through the game's own lights. Pick a preset colour or any colour with **Hue** and **Colour purity**.
+- **Photo FX**: filters (B&W, sepia, cold, warm, vintage, Polaroid, 90s camcorder), exposure, contrast, saturation, temperature, vignette, grain, tilt-shift, lens drops, chromatic aberration, bloom, lens distortion, radial blur, haze and a **fisheye** lens (full frame or round border).
 - **Composition**: grids, cinematic frames (2.39:1, 16:9, 4:5…), logo overlays and presets.
 - **Photo viewer** inside the game. Live **SkyGfx** preset switching.
+- **Game gallery**: an optional JPG copy (`gallery1.jpg`, `gallery2.jpg`...) goes to `User Files\Gallery`, so your photos show in the game's Gallery (SkyUI). You can also pick where the PNGs go.
 - Spanish and English UI. Gamepad (with GInput button icons) and keyboard/mouse.
 - Your settings are saved in `Documents\GTA San Andreas User Files\Aleks Photo Mode.ini`, so mod managers cannot wipe them.
 
@@ -82,7 +83,7 @@ Every game address is for GTA SA 1.0 US and was checked against [DK22Pac's plugi
 - The photo modes of **The Last of Us Part II** and **Alan Wake 2** inspired the CJ poses and expressions, look-at-camera, the orbit camera and the movable lights.
 - **XTC**, for the CJ pose idea and the reference that got the pose library started.
 - Developed with the help of **Claude** (Anthropic's AI) for the coding, reverse engineering and debugging. Design, testing and every in-game check were done by Alexgg1014.
-- Thanks to the community for the feedback and bug reports: Georgian, Daviserys, XTC, XG417, adambrock and everyone in the server.
+- Thanks to the community for the feedback and bug reports: Georgian, Daviserys, XTC, XG417, adambrock, MortalEyes, Cattuba, ksatria, diego brando and everyone in the server.
 - [DK22Pac's plugin-sdk](https://github.com/DK22Pac/plugin-sdk) and the reverse-engineering community, for the documented addresses and structures.
 
 ## License

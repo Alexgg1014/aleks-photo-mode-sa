@@ -37,16 +37,18 @@ using EndSceneFn=HRESULT (STDMETHODCALLTYPE*)(IDirect3DDevice9*);
 using PresentFn=HRESULT (STDMETHODCALLTYPE*)(IDirect3DDevice9*,const RECT*,const RECT*,HWND,const RGNDATA*);
 using RwBeginFn=void* (__cdecl*)(void*);
 using DrawFn=void (__cdecl*)();
-using ResetFn=HRESULT (STDMETHODCALLTYPE*)(IDirect3DDevice9*,D3DPRESENT_PARAMETERS*);ResetFn oldReset=nullptr;
+using ResetFn=HRESULT (STDMETHODCALLTYPE*)(IDirect3DDevice9*,D3DPRESENT_PARAMETERS*);
 HMODULE self=nullptr; wchar_t folder[MAX_PATH]{}, ini[MAX_PATH]{}, logPath[MAX_PATH]{};
-XInputGetStateFn xinput=nullptr; BeginSceneFn oldBegin=nullptr; EndSceneFn oldEnd=nullptr; PresentFn oldPresent=nullptr;
+XInputGetStateFn xinput=nullptr;
 RwBeginFn oldRwBegin=nullptr;void* hookedRwCamera=nullptr;
 IDirect3DDevice9* hooked=nullptr; bool active=false, priorPause=false, priorHud=true;
 Matrix original{}, pose{}; Vec3 origin{}; bool cameraOrbit=false,orbitReady=false; float orbitDistance=3,orbitHeight=0.5f; float yaw=0,pitch=0,roll=0,fov=70,originalFov=70,gameHandedness=1;
 struct ViewWindow{float x,y;};ViewWindow originalWindow{};
 float speed=12,lookSpeed=100,maxDistance=160;bool collision=true,invertY=false; unsigned holdMs=600,hotkey=VK_F6;
 MenuState menu;   // Phase 2 menu (photo_menu.h); its game side lives in photo_phase2.inc
-unsigned prevButtons=0,prevPadButtons=0;unsigned long long lastOpenTap=0; bool prevKey=false, comboLatched=false, circleLatched=false;
+// EFECTOS > Ojo de pez renders wider than the chosen FOV (160 at full strength) so the shader has picture to bend into the corners.
+float renderFov(){float s=std::clamp(menu.value[IT_FISHEYE]/100.f,0.f,1.f);return fov+s*(std::max(160.f,fov)-fov);}
+unsigned prevButtons=0,prevPadButtons=0,heldAtOpen=0;unsigned long long lastOpenTap=0; bool prevKey=false, comboLatched=false, circleLatched=false;
 unsigned long long comboSince=0,circleSince=0,lastFrame=0,noticeUntil=0,padRetryAt=0;
 unsigned long long resumeUntil=0;bool sawFocusPause=false;
 unsigned captureAt=0;bool captureWithUi=false;   // diagnostics only: keep the prompt panel in the capture   // frame number whose Present copies the backbuffer (UI already hidden)
@@ -250,7 +252,7 @@ void applyPose(){
         else mem<Vec3>(CAMERA_PLACEMENT_POS)=pose.pos;
         mem<Vec3>(CAMERA_GAME_POS)=pose.pos;
     }
-    float scale=std::tan(fov*PI/360.f)/std::tan(originalFov*PI/360.f);
+    float scale=std::tan(renderFov()*PI/360.f)/std::tan(originalFov*PI/360.f);
     reinterpret_cast<void (__cdecl*)(float)>(0x6FF410)(2.f*std::atan(std::tan(originalDrawFov*PI/360.f)*scale)*180.f/PI);
     reinterpret_cast<void (__thiscall*)(void*,bool,bool)>(0x5150E0)(reinterpret_cast<void*>(CAMERA),false,false);
     syncRenderCamera();
@@ -371,7 +373,7 @@ void updatePose(const PadState& p,float dt){
     float lx=deadzone(p.lx),ly=deadzone(p.ly),rx=deadzone(p.rx),ry=deadzone(p.ry);
     if(invertY)ry=-ry;
     // Square modifies the sticks so D-pad remains untouched for other ASIs.
-    if(p.buttons&XINPUT_GAMEPAD_X){fov=std::clamp(fov-ry*dt*35.f,25.f,100.f);speed=std::clamp(speed+ly*dt*10.f,1.f,60.f);ry=0;ly=0;}
+    if(p.buttons&XINPUT_GAMEPAD_X){fov=zoomFov(fov,ry*dt);speed=std::clamp(speed+ly*dt*10.f,1.f,60.f);ry=0;ly=0;}
     if(kbBoost){lx*=3;ly*=3;}
     yaw+=rx*lookSpeed*dt*PI/180.f;pitch=std::clamp(pitch+ry*lookSpeed*dt*PI/180.f,-1.48f,1.48f);
     if(p.buttons&XINPUT_GAMEPAD_LEFT_SHOULDER)roll-=dt;
@@ -461,7 +463,9 @@ void frameTick(){
     if(active&&menu.open&&openWith!=OB_L3_R3)combo=false;
     prevPadButtons=padButtons;
     bool toggle=keyPressed()||(gameFocused()&&combo);
-    if(toggle){if(active)restore();else openMode();}
+    // Buttons still held from the open combo (R1 of R1 + down rolls the camera) are ignored until they are released.
+    if(toggle){if(active)restore();else if(openMode())heldAtOpen=padButtons;}
+    heldAtOpen&=padButtons;b&=~heldAtOpen;pad.buttons&=~heldAtOpen;
     if(active){
         if(mem<bool>(CUTSCENE_RUNNING)&&!inCutsceneSession){restore();prevButtons=b;return;}   // a cutscene starting mid-session still closes it
         if(pad.connected){
@@ -598,12 +602,48 @@ bool iconDraw(IDirect3DDevice9* dev,float x,float y,float size,Icon which,DWORD 
 
 // ---------- capture ----------
 struct ImageJob{std::vector<BYTE> bgra;UINT width,height;};
+// Documents\GTA San Andreas User Files: where the game keeps its saves and the photos of its own Gallery.
+std::wstring userFilesDir(){wchar_t* docs=nullptr;std::wstring r;
+    if(SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents,0,nullptr,&docs)))r=std::wstring(docs)+L"\\GTA San Andreas User Files";
+    if(docs)CoTaskMemFree(docs);return r;}
+// PhotoFolder= in the mod's INI wins; otherwise AJUSTES > Carpeta de fotos: Pictures, the game's Gallery folder or next to the mod.
 std::wstring photoFolder(){wchar_t* pictures=nullptr;std::wstring result;
     wchar_t custom[MAX_PATH]{};GetPrivateProfileStringW(L"PhotoMode",L"PhotoFolder",L"",custom,MAX_PATH,ini);
+    int where=menu.choice(IT_PHOTO_FOLDER);std::wstring user=where==1?userFilesDir():std::wstring();
     if(custom[0])result=custom;
+    else if(!user.empty())result=user+L"\\Gallery";
+    else if(where==2)result=std::wstring(folder)+L"\\Photos";
     else if(SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Pictures,0,nullptr,&pictures))){result=pictures;CoTaskMemFree(pictures);result+=L"\\GTA San Andreas Photo Mode";}
     else result=folder;
     SHCreateDirectoryExW(nullptr,result.c_str(),nullptr);return result;
+}
+// AJUSTES > Copia JPG para la galería: the game's Gallery (and SkyUI's) shows User Files\Gallery\gallery1.jpg, gallery2.jpg...
+// The copy takes the first free number, so the list has no gaps. JPG at quality 95; the PNG stays the full-quality original.
+void saveGalleryCopy(IWICImagingFactory* factory,const ImageJob& job){
+    std::wstring dir=userFilesDir();if(dir.empty()){log("gallery copy skipped: no Documents folder");return;}
+    dir+=L"\\Gallery";SHCreateDirectoryExW(nullptr,dir.c_str(),nullptr);
+    wchar_t path[MAX_PATH]{};bool fresh=false;
+    for(int n=1;n<10000&&!fresh;++n){swprintf_s(path,L"%s\\gallery%d.jpg",dir.c_str(),n);fresh=GetFileAttributesW(path)==INVALID_FILE_ATTRIBUTES;}
+    std::vector<BYTE> bgr(static_cast<size_t>(job.width)*job.height*3);
+    for(size_t i=0,j=0;i+3<job.bgra.size()&&j+2<bgr.size();i+=4,j+=3){bgr[j]=job.bgra[i];bgr[j+1]=job.bgra[i+1];bgr[j+2]=job.bgra[i+2];}
+    IWICStream* stream=nullptr;IWICBitmapEncoder* enc=nullptr;IWICBitmapFrameEncode* frame=nullptr;IPropertyBag2* props=nullptr;
+    HRESULT hr=fresh?factory->CreateStream(&stream):E_FAIL;
+    if(SUCCEEDED(hr))hr=stream->InitializeFromFilename(path,GENERIC_WRITE);
+    if(SUCCEEDED(hr))hr=factory->CreateEncoder(GUID_ContainerFormatJpeg,nullptr,&enc);
+    if(SUCCEEDED(hr))hr=enc->Initialize(stream,WICBitmapEncoderNoCache);
+    if(SUCCEEDED(hr))hr=enc->CreateNewFrame(&frame,&props);
+    if(SUCCEEDED(hr)&&props){PROPBAG2 option{};option.pstrName=const_cast<LPOLESTR>(L"ImageQuality");VARIANT v{};v.vt=VT_R4;v.fltVal=0.95f;props->Write(1,&option,&v);}
+    if(SUCCEEDED(hr))hr=frame->Initialize(props);
+    if(SUCCEEDED(hr))hr=frame->SetSize(job.width,job.height);
+    WICPixelFormatGUID format=GUID_WICPixelFormat24bppBGR;
+    if(SUCCEEDED(hr))hr=frame->SetPixelFormat(&format);
+    if(SUCCEEDED(hr)&&format!=GUID_WICPixelFormat24bppBGR)hr=E_FAIL;
+    if(SUCCEEDED(hr))hr=frame->WritePixels(job.height,job.width*3,static_cast<UINT>(bgr.size()),bgr.data());
+    if(SUCCEEDED(hr))hr=frame->Commit();if(SUCCEEDED(hr))hr=enc->Commit();
+    if(props)props->Release();if(frame)frame->Release();if(enc)enc->Release();if(stream)stream->Release();
+    if(FAILED(hr)&&fresh)DeleteFileW(path);
+    char utf8[MAX_PATH*3]{};WideCharToMultiByte(CP_UTF8,0,path,-1,utf8,sizeof(utf8),nullptr,nullptr);
+    logf("%s: %s (hr=%08lX)",SUCCEEDED(hr)?"gallery copy saved":"gallery copy failed",utf8,static_cast<unsigned long>(hr));
 }
 DWORD WINAPI savePng(void* ptr){
     ImageJob* job=static_cast<ImageJob*>(ptr);CoInitializeEx(nullptr,COINIT_MULTITHREADED);
@@ -642,7 +682,9 @@ DWORD WINAPI savePng(void* ptr){
     char utf8[MAX_PATH*3]{};WideCharToMultiByte(CP_UTF8,0,path,-1,utf8,sizeof(utf8),nullptr,nullptr);
     logf("%s %ux%u: %s (hr=%08lX)",SUCCEEDED(hr)?"photo saved":"photo save failed",job->width,job->height,utf8,static_cast<unsigned long>(hr));
     noticeFor(SUCCEEDED(hr)?"Foto guardada":"No se pudo guardar la foto");
-    if(frame)frame->Release();if(enc)enc->Release();if(stream)stream->Release();if(factory)factory->Release();
+    if(frame)frame->Release();if(enc)enc->Release();if(stream)stream->Release();
+    if(menu.on(IT_GALLERY_COPY))saveGalleryCopy(factory,*job);
+    if(factory)factory->Release();
     CoUninitialize();delete job;InterlockedExchange(&saving,0);return 0;
 }
 void captureFrame(IDirect3DDevice9* dev){
@@ -735,13 +777,23 @@ void installCameraHook(){
         logf("RW camera BeginUpdate hook ready (camera %p, scene camera %p, previous %s)",rw,mem<void*>(SCENE_CAMERA),where(reinterpret_cast<uintptr_t>(previous),at,sizeof(at)));
     }
 }
+// The original functions are kept per vtable: some setups (windowed-mode mods, d3d9.dll wrappers) recreate the device after
+// startup, sometimes as a different object type with its own vtable, which gets hooked too (see watchD3D9).
+struct HookedTable{void** table;BeginSceneFn begin;EndSceneFn end;PresentFn present;ResetFn reset;};HookedTable hookedTables[4]{};int hookedTableCount=0;
+HookedTable& tableOf(IDirect3DDevice9* dev){void** t=*reinterpret_cast<void***>(dev);
+    for(int i=0;i<hookedTableCount;++i)if(hookedTables[i].table==t)return hookedTables[i];return hookedTables[0];}
+// The device photo mode works with is the game's current one (RwD3D9 device at 0xC97C28), followed if it is recreated.
+bool isMainDevice(IDirect3DDevice9* dev){
+    if(dev!=hooked&&dev==mem<IDirect3DDevice9*>(0xC97C28)){logf("D3D9 device changed (%p -> %p); following the game's current device",static_cast<void*>(hooked),static_cast<void*>(dev));hooked=dev;}
+    return dev==hooked;
+}
 HRESULT STDMETHODCALLTYPE beginScene(IDirect3DDevice9* dev){
-    if(dev==hooked){if(!beginSeen){log("first BeginScene");beginSeen=true;}installCameraHook();}
-    return oldBegin(dev);
+    if(isMainDevice(dev)){if(!beginSeen){log("first BeginScene");beginSeen=true;}installCameraHook();}
+    return tableOf(dev).begin(dev);
 }
 HRESULT STDMETHODCALLTYPE endScene(IDirect3DDevice9* dev){
-    if(dev==hooked&&!endSeen){log("first EndScene");endSeen=true;}
-    return oldEnd(dev);
+    if(isMainDevice(dev)&&!endSeen){log("first EndScene");endSeen=true;}
+    return tableOf(dev).end(dev);
 }
 unsigned long long lastDiagSecond=0,lastBeginCalls=0,lastBeginMain=0;
 void diagFrame(){
@@ -762,11 +814,11 @@ void diagFrame(){
     lastBeginCalls=beginCalls;lastBeginMain=beginMain;lastDiagSecond=now;
 }
 HRESULT STDMETHODCALLTYPE reset(IDirect3DDevice9* dev,D3DPRESENT_PARAMETERS* params){
-    if(dev==hooked)releaseDefaultPool();   // D3DPOOL_DEFAULT resources must be gone before IDirect3DDevice9::Reset
-    return oldReset(dev,params);
+    if(isMainDevice(dev))releaseDefaultPool();   // D3DPOOL_DEFAULT resources must be gone before IDirect3DDevice9::Reset
+    return tableOf(dev).reset(dev,params);
 }
 HRESULT STDMETHODCALLTYPE present(IDirect3DDevice9* dev,const RECT* s,const RECT* d,HWND h,const RGNDATA* r){
-    if(dev==hooked){
+    if(isMainDevice(dev)){
         ++frameNo;mainThread=GetCurrentThreadId();
         if(!presentSeen){log("first Present");presentSeen=true;if(watchWrites)armWatch();}
         installCameraHook();
@@ -779,7 +831,7 @@ HRESULT STDMETHODCALLTYPE present(IDirect3DDevice9* dev,const RECT* s,const RECT
         if(active)presentPipeline(dev);else if(captureAt&&frameNo>=captureAt)captureFrame(dev);
         if(diagLevel)diagFrame();
     }
-    HRESULT result=oldPresent(dev,s,d,h,r);
+    HRESULT result=tableOf(dev).present(dev,s,d,h,r);
     if(dev==hooked){
         // Back to a frozen timer before the next CTimer::Update / CGame::Process.
         if(renderPhase)mem<float>(TIME_STEP)=savedStep;
@@ -868,6 +920,30 @@ void logModules(){
     for(const wchar_t* n:names){if(GetModuleHandleW(n)){char a[96];WideCharToMultiByte(CP_UTF8,0,n,-1,a,sizeof(a),nullptr,nullptr);present+=" ";present+=a;}}
     log(present.c_str());
 }
+// Hooks BeginScene/EndScene/Present/Reset in this device's vtable, once per vtable.
+bool hookDeviceTable(IDirect3DDevice9* dev){
+    void** table=*reinterpret_cast<void***>(dev);
+    for(int i=0;i<hookedTableCount;++i)if(hookedTables[i].table==table)return true;
+    if(hookedTableCount>=4)return false;
+    void* b=nullptr;void* e=nullptr;void* p=nullptr;void* rs=nullptr;
+    if(!hookSlot(&table[41],reinterpret_cast<void*>(beginScene),&b)||!hookSlot(&table[42],reinterpret_cast<void*>(endScene),&e)||
+       !hookSlot(&table[17],reinterpret_cast<void*>(present),&p)||!hookSlot(&table[16],reinterpret_cast<void*>(reset),&rs))return false;
+    hookedTables[hookedTableCount++]={table,reinterpret_cast<BeginSceneFn>(b),reinterpret_cast<EndSceneFn>(e),reinterpret_cast<PresentFn>(p),reinterpret_cast<ResetFn>(rs)};
+    return true;
+}
+// Keeps watching the game's device: a new device with a different vtable gets hooked as well, and if nothing reaches our
+// Present the log says where the call goes instead (a mod that replaced the slot without chaining).
+void watchD3D9(){
+    bool toldSilent=false;
+    for(unsigned long long start=GetTickCount64();;Sleep(1000)){
+        auto* dev=mem<IDirect3DDevice9*>(0xC97C28);if(!dev)continue;
+        void** table=*reinterpret_cast<void***>(dev);bool known=false;for(int i=0;i<hookedTableCount;++i)known|=hookedTables[i].table==table;
+        if(!known){if(hookDeviceTable(dev))logf("D3D9 hooks added for the game's new device %p (another device type)",static_cast<void*>(dev));}
+        if(!presentSeen&&!toldSilent&&GetTickCount64()-start>20000){toldSilent=true;char at[96];
+            logf("no Present reached photo mode after 20 s: device %p, Present slot -> %s",static_cast<void*>(dev),where(reinterpret_cast<uintptr_t>(table[17]),at,sizeof(at)));}
+        if(presentSeen&&GetTickCount64()-start>600000)return;   // settled
+    }
+}
 DWORD WINAPI init(void*){
     GetModuleFileNameW(self,folder,MAX_PATH);wchar_t* slash=wcsrchr(folder,L'\\');if(slash)*slash=0;
     swprintf_s(ini,L"%s\\Aleks.PhotoMode.SA.ini",folder);swprintf_s(logPath,L"%s\\Aleks.PhotoMode.SA.log",folder);
@@ -887,14 +963,10 @@ DWORD WINAPI init(void*){
     for(const wchar_t* name:{L"xinput1_4.dll",L"xinput1_3.dll",L"xinput9_1_0.dll"}){HMODULE m=GetModuleHandleW(name);if(!m)m=LoadLibraryW(name);if(m){xinput=reinterpret_cast<XInputGetStateFn>(GetProcAddress(m,"XInputGetState"));if(xinput)break;}}
     ensureFolders();loadMenu();
     installHudHooks();
-    for(int i=0;i<300;++i){auto* dev=mem<IDirect3DDevice9*>(0xC97C28);if(dev){void** table=*reinterpret_cast<void***>(dev);void* b=nullptr;void* e=nullptr;void* p=nullptr;
-            void* rs=nullptr;
-            if(hookSlot(&table[41],reinterpret_cast<void*>(beginScene),&b)&&hookSlot(&table[42],reinterpret_cast<void*>(endScene),&e)&&hookSlot(&table[17],reinterpret_cast<void*>(present),&p)&&hookSlot(&table[16],reinterpret_cast<void*>(reset),&rs)){
-                oldReset=reinterpret_cast<ResetFn>(rs);
-                oldBegin=reinterpret_cast<BeginSceneFn>(b);oldEnd=reinterpret_cast<EndSceneFn>(e);oldPresent=reinterpret_cast<PresentFn>(p);hooked=dev;
+    for(int i=0;i<300;++i){auto* dev=mem<IDirect3DDevice9*>(0xC97C28);if(dev&&hookDeviceTable(dev)){hooked=dev;
                 log("D3D9 hooks ready");logModules();
                 if(diagLevel){reportDetours();diffInit();if(watchWrites)AddVectoredExceptionHandler(1,watchHandler);}
-                return 0;}}
+                watchD3D9();return 0;}
         Sleep(100);
     }log("D3D9 device unavailable");return 0;
 }

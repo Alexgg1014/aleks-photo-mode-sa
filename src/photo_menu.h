@@ -15,11 +15,11 @@ enum ItemId {
     IT_GRID, IT_FRAME, IT_HIDE_PLAYER, IT_HIDE_PEOPLE, IT_POSE, IT_POSE_FRAME, IT_EXPRESSION, IT_LOOK_AT, IT_WEAPON, IT_TIME, IT_WEATHER, IT_SLOWMO, IT_NEXT_FRAME, IT_LOGO, IT_LOGO_POS, IT_LOGO_SIZE, IT_PRESET_SLOT, IT_PRESET_SAVE, IT_PRESET_LOAD, IT_CAMERA_MODE,
     // AJUSTES
     IT_MOVE_SPEED, IT_LOOK_SPEED, IT_INVERT_Y, IT_MAX_DISTANCE, IT_COLLISION, IT_OPEN_BUTTON, IT_MENU_BUTTON, IT_PROMPTS, IT_STATUS, IT_ACCENT, IT_MENU_BG, IT_ICONS,
-    IT_SOUNDS, IT_MUSIC, IT_MUSIC_VOLUME, IT_MOUSE_LOOK, IT_LANGUAGE, IT_CUTSCENE_CAMERA, IT_SETTINGS_RESET,
+    IT_SOUNDS, IT_MUSIC, IT_MUSIC_VOLUME, IT_MOUSE_LOOK, IT_LANGUAGE, IT_CUTSCENE_CAMERA, IT_PHOTO_FOLDER, IT_GALLERY_COPY, IT_SETTINGS_RESET,
     // EFECTOS
-    IT_FILTER, IT_EXPOSURE, IT_CONTRAST, IT_SATURATION, IT_TEMPERATURE, IT_VIGNETTE, IT_GRAIN, IT_TILT, IT_TILT_FOCUS, IT_LENS_DROPS, IT_SKYGFX, IT_CHROMA, IT_BLOOM, IT_DISTORTION, IT_RADIAL_BLUR, IT_HAZE, IT_FX_RESET,
+    IT_FILTER, IT_EXPOSURE, IT_CONTRAST, IT_SATURATION, IT_TEMPERATURE, IT_VIGNETTE, IT_GRAIN, IT_TILT, IT_TILT_FOCUS, IT_LENS_DROPS, IT_SKYGFX, IT_CHROMA, IT_BLOOM, IT_DISTORTION, IT_RADIAL_BLUR, IT_HAZE, IT_FISHEYE, IT_FISHEYE_CIRCLE, IT_FX_RESET,
     // LUCES
-    IT_LIGHT_SLOT, IT_LIGHT_TYPE, IT_LIGHT_PLACE, IT_LIGHT_MOVE, IT_LIGHT_MOVE_MODE, IT_LIGHT_ON, IT_LIGHT_COLOR, IT_LIGHT_INTENSITY, IT_LIGHT_RANGE, IT_LIGHT_SHADOWS, IT_LIGHT_REMOVE, IT_LIGHT_CLEAR,
+    IT_LIGHT_SLOT, IT_LIGHT_TYPE, IT_LIGHT_PLACE, IT_LIGHT_MOVE, IT_LIGHT_MOVE_MODE, IT_LIGHT_ON, IT_LIGHT_COLOR, IT_LIGHT_INTENSITY, IT_LIGHT_RANGE, IT_LIGHT_HUE, IT_LIGHT_SAT, IT_LIGHT_SHADOWS, IT_LIGHT_REMOVE, IT_LIGHT_CLEAR,
     IT_COUNT
 };
 struct MenuItem {
@@ -71,9 +71,19 @@ constexpr int POSE_COUNT = static_cast<int>(sizeof(poseDefs) / sizeof(poseDefs[0
 // Photo lights (Alan Wake 2 style): colour presets, linear RGB.
 struct LightColor { const char* label; float r, g, b; };
 inline const LightColor lightColors[] = {{"Blanco cálido", 1.f, .82f, .6f}, {"Blanco frío", .75f, .85f, 1.f}, {"Rojo", 1.f, .12f, .08f}, {"Azul", .2f, .35f, 1.f},
-    {"Verde", .2f, 1.f, .3f}, {"Naranja", 1.f, .48f, .1f}, {"Morado", .6f, .2f, 1.f}, {"Rosa", 1.f, .3f, .7f}, {"Amarillo", 1.f, .9f, .2f}};
+    {"Verde", .2f, 1.f, .3f}, {"Naranja", 1.f, .48f, .1f}, {"Morado", .6f, .2f, 1.f}, {"Rosa", 1.f, .3f, .7f}, {"Amarillo", 1.f, .9f, .2f},
+    {"Personalizado", 1.f, 1.f, 1.f}};   // the last one takes LUCES > Tono / Saturación of the color
 constexpr int LIGHT_COLOR_COUNT = static_cast<int>(sizeof(lightColors) / sizeof(lightColors[0]));
 constexpr int PHOTO_LIGHTS = 3;
+constexpr int LIGHT_COLOR_CUSTOM = LIGHT_COLOR_COUNT - 1;
+// Hue in degrees (0 red, 120 green, 240 blue), saturation 0..1, full brightness: the light's intensity sets how bright it is.
+struct Rgb { float r, g, b; };
+inline Rgb hueColor(float hue, float sat) {
+    float h = std::fmod(std::fmod(hue, 360.f) + 360.f, 360.f) / 60.f, x = 1.f - std::fabs(std::fmod(h, 2.f) - 1.f);
+    Rgb c = h < 1 ? Rgb{1, x, 0} : h < 2 ? Rgb{x, 1, 0} : h < 3 ? Rgb{0, 1, x} : h < 4 ? Rgb{0, x, 1} : h < 5 ? Rgb{x, 0, 1} : Rgb{1, 0, x};
+    sat = std::clamp(sat, 0.f, 1.f);
+    return {1.f - sat + sat * c.r, 1.f - sat + sat * c.g, 1.f - sat + sat * c.b};
+}
 inline std::vector<std::string> lightColorNames() { std::vector<std::string> n; for (const LightColor& c : lightColors) n.push_back(c.label); return n; }
 inline const float slowmoScales[] = {0.f, 0.05f, 0.1f, 0.25f, 0.5f};   // index 0 = frozen
 inline const float frameAspects[] = {0.f, 2.39f, 1.85f, 16.f/9.f, 4.f/3.f, 1.f, 4.f/5.f};
@@ -126,6 +136,11 @@ inline std::vector<MenuItem> makeMenu() {
         {IT_MOUSE_LOOK, TAB_SETTINGS, KIND_RANGE, "Sensibilidad del ratón", "MouseLook", 0, 100, 5, 40, {}, false},
         {IT_LANGUAGE, TAB_SETTINGS, KIND_CHOICE, "Idioma", "Language", 0, 2, 1, 0, {"Auto (juego)", "Español", "English"}, false},
         {IT_CUTSCENE_CAMERA, TAB_SETTINGS, KIND_CHOICE, "Cámara libre en cinemáticas", "CutsceneCamera", 0, 1, 1, 1, {"No", "Solo exteriores"}, false},
+        // Where photos go: Pictures\GTA San Andreas Photo Mode, the game's Gallery folder (User Files\Gallery) or a Photos folder next to the mod.
+        // PhotoFolder= in the mod's INI still wins over this.
+        {IT_PHOTO_FOLDER, TAB_SETTINGS, KIND_CHOICE, "Carpeta de fotos", "SaveFolder", 0, 2, 1, 0, {"Imágenes", "Galería del juego", "Junto al mod"}, false},
+        // Also writes a JPG copy named gallery1.jpg, gallery2.jpg... into User Files\Gallery, the files the game's (and SkyUI's) gallery shows.
+        {IT_GALLERY_COPY, TAB_SETTINGS, KIND_CHOICE, "Copia JPG para la galería", "GalleryCopy", 0, 1, 1, 0, yesNo, false},
         {IT_SETTINGS_RESET, TAB_SETTINGS, KIND_ACTION, "Restablecer ajustes", "", 0, 0, 0, 0, {}, false},
         {IT_FILTER, TAB_FX, KIND_CHOICE, "Filtro", "Filter", 0, 7, 1, 0, {"Ninguno", "Blanco y negro", "Sepia", "Frío", "Cálido", "Vintage", "Polaroid", "Cámara de los 90"}, true},
         {IT_EXPOSURE, TAB_FX, KIND_RANGE, "Exposición", "Exposure", -2, 2, 0.1f, 0, {}, true},
@@ -144,6 +159,8 @@ inline std::vector<MenuItem> makeMenu() {
         {IT_DISTORTION, TAB_FX, KIND_RANGE, "Distorsión de lente", "Distortion", -50, 50, 5, 0, {}, true},
         {IT_RADIAL_BLUR, TAB_FX, KIND_RANGE, "Desenfoque radial", "RadialBlur", 0, 100, 5, 0, {}, true},
         {IT_HAZE, TAB_FX, KIND_RANGE, "Neblina", "Haze", 0, 100, 5, 0, {}, true},
+        {IT_FISHEYE, TAB_FX, KIND_RANGE, "Ojo de pez", "Fisheye", 0, 100, 5, 0, {}, true},   // widens the camera and bends the image
+        {IT_FISHEYE_CIRCLE, TAB_FX, KIND_CHOICE, "Borde circular", "FisheyeCircle", 0, 1, 1, 0, yesNo, true},
         {IT_FX_RESET, TAB_FX, KIND_ACTION, "Restablecer efectos", "", 0, 0, 0, 0, {}, false},
         {IT_LIGHT_SLOT, TAB_LIGHTS, KIND_CHOICE, "Luz", "", 0, 2, 1, 0, {"Luz 1", "Luz 2", "Luz 3"}, false},
         {IT_LIGHT_TYPE, TAB_LIGHTS, KIND_CHOICE, "Tipo", "", 0, 2, 1, 0, {"Foco redondo", "Reflector", "Flash de cámara"}, false},
@@ -154,6 +171,8 @@ inline std::vector<MenuItem> makeMenu() {
         {IT_LIGHT_COLOR, TAB_LIGHTS, KIND_CHOICE, "Color", "", 0, static_cast<float>(LIGHT_COLOR_COUNT - 1), 1, 0, lightColorNames(), false},
         {IT_LIGHT_INTENSITY, TAB_LIGHTS, KIND_RANGE, "Intensidad", "", 5, 100, 5, 60, {}, false},
         {IT_LIGHT_RANGE, TAB_LIGHTS, KIND_RANGE, "Alcance", "", 2, 40, 1, 10, {}, false},
+        {IT_LIGHT_HUE, TAB_LIGHTS, KIND_RANGE, "Tono", "", 0, 350, 10, 30, {}, false},   // changing it switches Color to Personalizado
+        {IT_LIGHT_SAT, TAB_LIGHTS, KIND_RANGE, "Pureza del color", "", 0, 100, 5, 60, {}, false},
         {IT_LIGHT_SHADOWS, TAB_LIGHTS, KIND_CHOICE, "Sombras", "LightShadows", 0, 1, 1, 1, yesNo, false},   // with Proper Shaders only
         {IT_LIGHT_REMOVE, TAB_LIGHTS, KIND_ACTION, "Quitar esta luz", "", 0, 0, 0, 0, {}, false},
         {IT_LIGHT_CLEAR, TAB_LIGHTS, KIND_ACTION, "Quitar todas las luces", "", 0, 0, 0, 0, {}, false},
@@ -260,7 +279,9 @@ inline const Translation translations[] = {
     {"Aberración cromática","Chromatic aberration"},{"Resplandor","Bloom"},
     {"Luz","Light"},{"Luz 1","Light 1"},{"Luz 2","Light 2"},{"Luz 3","Light 3"},{"Colocar aquí","Place here"},{"Encendida","On"},{"Color","Colour"},
     {"Intensidad","Intensity"},{"Alcance","Range"},{"Quitar todas las luces","Remove all lights"},
-    {"Blanco cálido","Warm white"},{"Blanco frío","Cool white"},{"Azul","Blue"},{"Verde","Green"},{"Naranja","Orange"},{"Morado","Purple"},{"Rosa","Pink"},{"Amarillo","Yellow"},
+    {"Blanco cálido","Warm white"},{"Personalizado","Custom"},{"Tono","Hue"},{"Pureza del color","Colour purity"},
+    {"Carpeta de fotos","Photo folder"},{"Imágenes","Pictures"},{"Galería del juego","Game gallery"},{"Junto al mod","Next to the mod"},{"Copia JPG para la galería","JPG copy for the gallery"},
+    {"Ojo de pez","Fisheye"},{"Borde circular","Round border"},{"Blanco frío","Cool white"},{"Azul","Blue"},{"Verde","Green"},{"Naranja","Orange"},{"Morado","Purple"},{"Rosa","Pink"},{"Amarillo","Yellow"},
     {"Luz colocada","Light placed"},{"Las poses necesitan Tiempo: Congelado","Poses need Time: Frozen"},{"Mover luz","Move light"},{"Modo de movimiento","Move mode"},{"Alrededor de CJ","Around CJ"},{"Quitar esta luz","Remove this light"},{"Sombras","Shadows"},{"Luz quitada","Light removed"},{"Mueve la luz con el stick o WASD, gírala con la cámara. X / Enter la suelta","Move the light with the stick or WASD, aim it with the look controls. X / Enter drops it"},{"Pulsa Derecha","Press Right"},{"Moviendo","Moving"},{"Luces quitadas","Lights removed"},{"Primero coloca la luz","Place the light first"},
     {"Rejilla","Grid"},{"Tercios","Thirds"},{"Cuadrícula","Squares"},{"Centro","Centre"},{"Diagonales","Diagonals"},
     {"Marco","Frame"},{"2.39:1 cine","2.39:1 cinema"},{"1.85:1","1.85:1"},{"16:9","16:9"},{"4:3","4:3"},{"1:1","1:1"},{"4:5 vertical","4:5 portrait"},

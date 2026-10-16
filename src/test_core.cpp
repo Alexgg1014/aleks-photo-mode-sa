@@ -102,6 +102,12 @@ int main(){
         Box b=logoBox(1920,1080,400,200,20,0,{0,0});
         CHECK(near(b.w,384)&&near(b.h,192)&&b.x+b.w<=1920&&b.y+b.h<=1080&&b.x>1920/2);   // bottom right, inside the image
         Box c=logoBox(1920,1080,400,200,20,3,cine);CHECK(b.x>c.x&&c.y>=cine.top);         // top left stays below the bar
+        Rgb red=hueColor(0,1),green=hueColor(120,1),blue=hueColor(240,1),white=hueColor(200,0),wrap=hueColor(360,1);
+        CHECK(near(red.r,1)&&near(red.g,0)&&near(red.b,0)&&near(green.g,1)&&near(green.r,0)&&near(blue.b,1)&&near(blue.g,0));
+        CHECK(near(white.r,1)&&near(white.g,1)&&near(white.b,1)&&near(wrap.r,1)&&near(wrap.g,0));
+        CHECK(all.item(IT_LIGHT_COLOR).choices.back()=="Personalizado"&&LIGHT_COLOR_CUSTOM==static_cast<int>(all.item(IT_LIGHT_COLOR).max));
+        // Zoom: about 35 degrees per second at 70, the limits are 5 and 100, and it never jumps past them.
+        CHECK(near(zoomFov(70,1.f/60)+35.f/60,70,0.05f)&&near(zoomFov(6,10),5)&&near(zoomFov(90,-10),100)&&zoomFov(5,1)>=5);
     }
     if(failures) std::printf("%d failure(s)\n",failures); else std::printf("test_core: all checks passed\n");
     return failures?1:0;

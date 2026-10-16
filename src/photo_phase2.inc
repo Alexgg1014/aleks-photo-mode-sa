@@ -504,16 +504,21 @@ void passiveFlyingProbe();
 // light pass kept showing an old colour and position, or nothing, while car headlights were in view. Without Proper (or without
 // its depth buffer) they go into the game's own light list right before the scene is drawn (CPointLights::AddLight 0x7000E0).
 constexpr uintptr_t FN_ADD_POINT_LIGHT=0x7000E0,POINT_LIGHT_COUNT=0xC3F0D0;
-struct PhotoLight{bool placed=false;bool on=false;Vec3 pos{},dir{0,0,0};int type=0,color=0;float intensity=60,range=10;};PhotoLight photoLights[PHOTO_LIGHTS];   // type: 0 point, 1 spotlight, 2 camera flash
+struct PhotoLight{bool placed=false;bool on=false;Vec3 pos{},dir{0,0,0};int type=0,color=0;float intensity=60,range=10,hue=30,sat=60;};PhotoLight photoLights[PHOTO_LIGHTS];   // type: 0 point, 1 spotlight, 2 camera flash
 int lightSlotShown=-1;unsigned ourLightsBase=0,ourLightsCount=0;
+// A preset colour, or LUCES > Tono / Pureza del color when Color is Personalizado.
+Rgb lightRgb(const PhotoLight& l){if(l.color==LIGHT_COLOR_CUSTOM)return hueColor(l.hue,l.sat/100.f);const LightColor& c=lightColors[l.color];return {c.r,c.g,c.b};}
 void syncLightMenu(){
     int slot=std::clamp(menu.choice(IT_LIGHT_SLOT),0,PHOTO_LIGHTS-1);PhotoLight& l=photoLights[slot];
     if(slot!=lightSlotShown){   // show the chosen light's values
         lightSlotShown=slot;menu.value[IT_LIGHT_ON]=l.on?1.f:0.f;menu.value[IT_LIGHT_TYPE]=static_cast<float>(l.type);menu.value[IT_LIGHT_COLOR]=static_cast<float>(l.color);
-        menu.value[IT_LIGHT_INTENSITY]=l.intensity;menu.value[IT_LIGHT_RANGE]=l.range;return;}
+        menu.value[IT_LIGHT_INTENSITY]=l.intensity;menu.value[IT_LIGHT_RANGE]=l.range;menu.value[IT_LIGHT_HUE]=l.hue;menu.value[IT_LIGHT_SAT]=l.sat;return;}
     bool on=menu.on(IT_LIGHT_ON);l.type=std::clamp(menu.choice(IT_LIGHT_TYPE),0,2);
     if(on&&!l.placed&&l.type!=2){menu.value[IT_LIGHT_ON]=0;noticeFor("Primero coloca la luz");on=false;}
+    // Touching Tono or Pureza switches the light to the custom colour, so the change is seen right away.
+    if(menu.value[IT_LIGHT_HUE]!=l.hue||menu.value[IT_LIGHT_SAT]!=l.sat)menu.value[IT_LIGHT_COLOR]=static_cast<float>(LIGHT_COLOR_CUSTOM);
     l.on=on;l.color=std::clamp(menu.choice(IT_LIGHT_COLOR),0,LIGHT_COLOR_COUNT-1);l.intensity=menu.value[IT_LIGHT_INTENSITY];l.range=menu.value[IT_LIGHT_RANGE];
+    l.hue=menu.value[IT_LIGHT_HUE];l.sat=menu.value[IT_LIGHT_SAT];
 }
 void placeLight(){
     int slot=std::clamp(menu.choice(IT_LIGHT_SLOT),0,PHOTO_LIGHTS-1);PhotoLight& l=photoLights[slot];
@@ -619,7 +624,7 @@ void addPhotoLights(){
     ourLightsBase=count;
     for(const PhotoLight& l:photoLights){
         if(!l.on||count>=32||(!l.placed&&l.type!=2))continue;
-        const LightColor& c=lightColors[l.color];float k=l.intensity/100.f*1.6f;
+        Rgb c=lightRgb(l);float k=l.intensity/100.f*1.6f;
         Vec3 at=l.type==2?add(pose.pos,mul(pose.forward,0.3f)):l.pos,dir=l.type==0?Vec3{0,0,0}:(l.type==2?pose.forward:l.dir);   // the flash rides on the camera
         reinterpret_cast<void (__cdecl*)(unsigned char,Vec3,Vec3,float,float,float,float,unsigned char,bool,void*)>(FN_ADD_POINT_LIGHT)
             (static_cast<unsigned char>(l.type==0?0:1),at,dir,l.range,c.r*k,c.g*k,c.b*k,0,false,nullptr);
@@ -913,7 +918,7 @@ bool keyboardInput(PadState& pad,unsigned long long now,float dt){
     if(dn(VK_RETURN))k.buttons|=XINPUT_GAMEPAD_A;if(dn(VK_DELETE))k.buttons|=XINPUT_GAMEPAD_X;if(dn('H'))k.buttons|=XINPUT_GAMEPAD_Y;
     kbBoost=dn(VK_SHIFT);
     bool plus=dn(VK_OEM_PLUS)||dn(VK_ADD),minus=dn(VK_OEM_MINUS)||dn(VK_SUBTRACT);
-    if(plus)fov=std::clamp(fov-dt*35.f,25.f,100.f);if(minus)fov=std::clamp(fov+dt*35.f,25.f,100.f);
+    if(plus)fov=zoomFov(fov,dt);if(minus)fov=zoomFov(fov,-dt);
     bool space=dn(VK_SPACE),click=dn(VK_LBUTTON),tab=dn(VK_TAB),esc=dn(VK_ESCAPE),r=dn('R');
     if(keyEdge(VK_SPACE,space)&&!menuOpen)requestCapture();
     if(keyEdge(VK_LBUTTON,click)&&!menuOpen)requestCapture();
@@ -1094,7 +1099,8 @@ float4 geo   : register(c2);   // 1/width, 1/height, focus line (uv.y), aspect
 float4 mode  : register(c3);   // filter, lens drops
 float4 area  : register(c4);   // picture area inside the frame bars (uv x0, y0, x1, y1)
 float4 extra : register(c5);   // chromatic aberration, bloom
-float4 lens  : register(c6);   // barrel distortion, radial blur, haze
+float4 lens  : register(c6);   // barrel distortion, radial blur, haze, fisheye
+float4 fish  : register(c7);   // tangent of the rendered half FOV: horizontal, vertical; round border
 float3 tap(float2 uv) { return tex2D(scene, uv).rgb; }
 float3 sepia(float3 c) { return float3(dot(c, float3(.393, .769, .189)), dot(c, float3(.349, .686, .168)), dot(c, float3(.272, .534, .131))); }
 float hash(float2 p) { return frac(sin(dot(p, float2(127.1, 311.7))) * 43758.5453); }
@@ -1148,6 +1154,17 @@ float4 main(float2 uv0 : TEXCOORD0) : COLOR0 {
     if (lens.x != 0) {   // lens distortion: barrel (+) or pincushion (-), scaled so the corners stay near the frame
         float2 d = (uv - 0.5) * float2(geo.w, 1); float r2 = dot(d, d);
         uv = 0.5 + (uv - 0.5) * (1 + lens.x * 0.35 * r2) / (1 + max(lens.x, 0) * 0.35 * 0.5);
+    }
+    float ring = 1;
+    if (lens.w > 0) {   // fisheye: the camera renders wider (renderFov) and the picture is respread evenly by angle (equidistant lens)
+        float2 p = (uv - 0.5) * 2, t = p * fish.xy;          // t: where this pixel sits on the rendered (flat) image plane
+        float diag = length(fish.xy), edge = atan(diag);     // the rendered corner and its angle
+        // Full frame: the corners keep their angle. Round border: the whole rendered frame fits inside a circle as tall as the picture.
+        float rho = fish.z > 0.5 ? length(p * float2(geo.w, 1)) : length(t) / diag;
+        float theta = min(rho * edge, 1.5);
+        float2 bent = length(t) > 1e-5 ? normalize(t) * tan(theta) : t;
+        uv = 0.5 + lerp(t, bent, saturate(lens.w * 1.5)) / fish.xy * 0.5;   // full curve by 65; past that only the view widens
+        if (fish.z > 0.5) ring = saturate((1 - rho) / (geo.y * 3));   // anti-aliased black outside the circle
     }
     float2 offs = 0; float shade = 0;
     if (mode.y > 0) drops(uv, mode.y, geo.w, offs, shade);
@@ -1217,7 +1234,7 @@ float4 main(float2 uv0 : TEXCOORD0) : COLOR0 {
     c *= lerp(1, vig * vig, look.x);
     float n = frac(sin(dot(uv * 997.0 + look.z, float2(12.9898, 78.233))) * 43758.5453);
     c += (n - 0.5) * look.y * 0.2;
-    return float4(saturate(c), 1);
+    return float4(saturate(c) * ring, 1);
 }
 )";
 IDirect3DPixelShader9* fxShader=nullptr;IDirect3DPixelShader9* lightShader=nullptr;IDirect3DPixelShader9* shadowShader=nullptr;IDirect3DVertexShader9* fxVertex=nullptr;bool fxTried=false;IDirect3DTexture9* sceneTex=nullptr;UINT sceneW=0,sceneH=0;D3DFORMAT sceneFmt=D3DFMT_UNKNOWN;
@@ -1269,12 +1286,12 @@ void drawClipQuad(IDirect3DDevice9* dev){
 void drawPhotoLightsPass(IDirect3DDevice9* dev,IDirect3DSurface9* back,const D3DSURFACE_DESC& d){
     if(!shaderLights())return;
     float w=static_cast<float>(d.Width),h=static_cast<float>(d.Height);
-    Basis b=basis_from_angles(yaw,pitch,roll);float tanV=std::tan(fov*PI/360.f)*0.75f,aspect=w/h;   // as in drawLightMarkers
+    Basis b=basis_from_angles(yaw,pitch,roll);float tanV=std::tan(renderFov()*PI/360.f)*0.75f,aspect=w/h;   // as in drawLightMarkers
     auto toView=[&](Vec3 v){return Vec3{dot(v,b.right),dot(v,b.up),dot(v,b.forward)};};
     float c[4*(6+3*PHOTO_LIGHTS)]{};int n=0;   // c0 view, c1 planes, c2-c10 lights, c11 shadows, c12-c14 camera axes
     for(const PhotoLight& l:photoLights){
         if(!l.on||(!l.placed&&l.type!=2))continue;
-        const LightColor& col=lightColors[l.color];float k=l.intensity/100.f*2.2f;
+        Rgb col=lightRgb(l);float k=l.intensity/100.f*2.2f;
         Vec3 at=l.type==2?Vec3{0,0,0.3f}:toView(sub(l.pos,pose.pos)),dir=l.type==2?Vec3{0,0,1}:toView(l.dir);   // the flash rides on the camera
         dir=length(dir)>0.5f?normalized(dir):Vec3{0,0,1};
         float* r=c+8+12*n;
@@ -1334,9 +1351,10 @@ void drawFx(IDirect3DDevice9* dev,IDirect3DSurface9* back,const D3DSURFACE_DESC&
         1/w,1/h,1-menu.value[IT_TILT_FOCUS]/100.f,w/h,static_cast<float>(menu.choice(IT_FILTER)),menu.value[IT_LENS_DROPS]/100.f*0.55f,0,0};
     Bars b=letterbox(w,h,frameAspects[std::clamp(menu.choice(IT_FRAME),0,6)]);
     float area[4]={b.side/w,b.top/h,1-b.side/w,1-b.top/h},extra[4]={menu.value[IT_CHROMA]/100.f,menu.value[IT_BLOOM]/100.f,0,0},
-        lens[4]={menu.value[IT_DISTORTION]/50.f,menu.value[IT_RADIAL_BLUR]/100.f,menu.value[IT_HAZE]/100.f,0};
+        lens[4]={menu.value[IT_DISTORTION]/50.f,menu.value[IT_RADIAL_BLUR]/100.f,menu.value[IT_HAZE]/100.f,menu.value[IT_FISHEYE]/100.f};
+    float tanV=std::tan(renderFov()*PI/360.f)*0.75f,fish[4]={tanV*w/h,tanV,menu.on(IT_FISHEYE_CIRCLE)?1.f:0.f,0};   // as in drawLightMarkers
     float vc[4]={-1/w,1/h,0,0};
-    dev->SetPixelShaderConstantF(0,c,4);dev->SetPixelShaderConstantF(4,area,1);dev->SetPixelShaderConstantF(5,extra,1);dev->SetPixelShaderConstantF(6,lens,1);dev->SetVertexShaderConstantF(0,vc,1);dev->SetPixelShader(fxShader);dev->SetVertexShader(fxVertex);
+    dev->SetPixelShaderConstantF(0,c,4);dev->SetPixelShaderConstantF(4,area,1);dev->SetPixelShaderConstantF(5,extra,1);dev->SetPixelShaderConstantF(6,lens,1);dev->SetPixelShaderConstantF(7,fish,1);dev->SetVertexShaderConstantF(0,vc,1);dev->SetPixelShader(fxShader);dev->SetVertexShader(fxVertex);
     dev->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE);
     dev->SetSamplerState(0,D3DSAMP_SRGBTEXTURE,FALSE);dev->SetRenderState(D3DRS_SRGBWRITEENABLE,FALSE);
     dev->SetTexture(0,sceneTex);dev->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);dev->SetSamplerState(0,D3DSAMP_MAGFILTER,D3DTEXF_LINEAR);
@@ -1352,8 +1370,10 @@ void drawPhotoLayers(IDirect3DDevice9* dev,IDirect3DSurface9* back,const D3DSURF
     drawPhotoLightsPass(dev,back,d);   // first, so blur, bloom and the filters see the light
     if(fxNeeded())drawFx(dev,back,d);
     Bars bars=currentBars(w,h);
-    if(bars.top>0){rect(dev,0,0,w,bars.top,0xFF000000);rect(dev,0,h-bars.top,w,bars.top,0xFF000000);}
-    if(bars.side>0){rect(dev,0,0,bars.side,h,0xFF000000);rect(dev,w-bars.side,0,bars.side,h,0xFF000000);}
+    // The bars reach 1 px past the screen edges: some drivers and d3d9 wrappers rasterize half a pixel off, which left
+    // the top row and the left column of the picture uncovered (Cattuba's camcorder photos).
+    if(bars.top>0){rect(dev,-1,-1,w+2,bars.top+1,0xFF000000);rect(dev,-1,h-bars.top,w+2,bars.top+1,0xFF000000);}
+    if(bars.side>0){rect(dev,-1,-1,bars.side+1,h+2,0xFF000000);rect(dev,w-bars.side,-1,bars.side+1,h+2,0xFF000000);}
     if(IDirect3DTexture9* logo=currentLogo(dev)){Box box=logoBox(w,h,static_cast<float>(logoW),static_cast<float>(logoH),menu.value[IT_LOGO_SIZE],menu.choice(IT_LOGO_POS),bars);quad(dev,logo,box.x,box.y,box.w,box.h,0xFFFFFFFF);}
     if(menu.choice(IT_FILTER)==FILTER_CAMCORDER)drawCamcorderStamp(dev,w,h,bars);
 }

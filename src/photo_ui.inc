@@ -302,7 +302,7 @@ void drawCamcorderStamp(IDirect3DDevice9* dev,float w,float h,Bars bars){
 // ---------- light markers (LUCES tab only, never in the photo) ----------
 // Each placed light is projected with the photo camera (vertical FOV from the game's 4:3 horizontal FOV) and drawn as a ring with its number.
 void drawLightMarkers(IDirect3DDevice9* dev,float w,float h,float k){
-    Basis b=basis_from_angles(yaw,pitch,roll);float tanV=std::tan(fov*PI/360.f)*0.75f,aspect=w/h;
+    Basis b=basis_from_angles(yaw,pitch,roll);float tanV=std::tan(renderFov()*PI/360.f)*0.75f,aspect=w/h;
     for(int i=0;i<PHOTO_LIGHTS;++i){
         const PhotoLight& l=photoLights[i];if(!l.placed||l.type==2)continue;
         Vec3 d=sub(l.pos,pose.pos);float z=dot(d,b.forward);if(z<0.2f)continue;
