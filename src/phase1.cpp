@@ -6,6 +6,7 @@
 #include <xinput.h>
 #include <mmsystem.h>
 #include <shellapi.h>
+#include <tlhelp32.h>
 #include <algorithm>
 #include <functional>
 #include <cmath>
@@ -369,6 +370,7 @@ Vec3 collide(Vec3 from,Vec3 to){
     if(found&&to.z<z+groundClearance&&to.z>z-2.f)to.z=z+groundClearance;   // only the floor right under the camera, not one far below a bridge
     return to;
 }
+bool pickerOpen();bool pickerJustOpened();void pickerFrame(const PadState& p,unsigned prev,float dt);   // photo_phase2.inc
 void updatePose(const PadState& p,float dt){
     float lx=deadzone(p.lx),ly=deadzone(p.ly),rx=deadzone(p.rx),ry=deadzone(p.ry);
     if(invertY)ry=-ry;
@@ -438,7 +440,9 @@ void autoTestFrame(unsigned long long now){
     synthetic=p;
 }
 
+unsigned iniHotkey=VK_F6;
 void frameTick(){
+    {int k=std::clamp(menu.choice(IT_OPEN_KEY),0,OPEN_KEY_COUNT-1);hotkey=k?static_cast<unsigned>(openKeys[k].vk):iniHotkey;}   // AJUSTES > Tecla de teclado
     unsigned long long now=GetTickCount64();float dt=lastFrame?std::min(0.05f,static_cast<float>(now-lastFrame)/1000.f):0;lastFrame=now;
     if(autoTestKey){bool k=gameFocused()&&(GetAsyncKeyState(static_cast<int>(autoTestKey))&0x8000)!=0;if(k&&!prevAutoKey&&autoDone){autoDone=false;autoStart=0;autoStep=0;readySince=0;log("AUTOTEST re-armed");}prevAutoKey=k;}
     if(autoTest==10)autoTest10Frame(now);else if(autoTest==9)autoTest9Frame(now);else if(autoTest==8)autoTest8Frame(now);else if(autoTest==7)autoTest7Frame(now);else if(autoTest==6)autoTest6Frame(now);else if(autoTest==5)autoTest5Frame(now);else if(autoTest==4)autoTest4Frame(now);else if(autoTest==3)autoTest3Frame(now);else if(autoTest==2)autoTest2Frame(now);else if(autoTest)autoTestFrame(now);
@@ -461,6 +465,9 @@ void frameTick(){
     }else{unsigned shoulder=openWith==OB_L1_DOWN?XINPUT_GAMEPAD_LEFT_SHOULDER:XINPUT_GAMEPAD_RIGHT_SHOULDER;
         combo=(padButtons&shoulder)&&tapped(XINPUT_GAMEPAD_DPAD_DOWN);}
     if(active&&menu.open&&openWith!=OB_L3_R3)combo=false;
+    // Street Talk's settings menu sets bit 0x4000 in CPad::Pads[0].DisablePlayerControls (0xB73458+0x10E) while it is open: its D-pad
+    // navigation must not open photo mode (double tap right/down). The double-tap timer and the L3+R3 hold start over then.
+    if(mem<WORD>(0xB73458+0x10E)&0x4000){combo=false;lastOpenTap=0;comboSince=0;}
     prevPadButtons=padButtons;
     bool toggle=keyPressed()||(gameFocused()&&combo);
     // Buttons still held from the open combo (R1 of R1 + down rolls the camera) are ignored until they are released.
@@ -475,9 +482,11 @@ void frameTick(){
             if((b&XINPUT_GAMEPAD_A)&&!(prevButtons&XINPUT_GAMEPAD_A)&&!crossForMenu)requestCapture();
             (void)triangleForMenu;   // Triangle hides the interface and an R3 tap resets the camera (photo_phase2.inc)
         }
+        bool picking=pickerOpen();if(picking&&!pickerJustOpened())pickerFrame(pad,prevButtons,dt);   // LUCES > Color picker takes the sticks and buttons
         phase2Frame();
         // While the menu is open L1/R1 switch tabs and the D-pad navigates; the sticks keep flying the camera as a live preview.
         PadState move=pad;
+        if(picking){move.lx=move.ly=move.rx=move.ry=0;move.lt=move.rt=0;move.buttons=0;}
         // L1/R1 roll only on their own: with the menu open they switch tabs, with the D-pad they form the menu combo.
         if(menu.open||(pad.buttons&(XINPUT_GAMEPAD_DPAD_UP|XINPUT_GAMEPAD_DPAD_DOWN|XINPUT_GAMEPAD_DPAD_LEFT|XINPUT_GAMEPAD_DPAD_RIGHT)))
             move.buttons&=~static_cast<unsigned>(XINPUT_GAMEPAD_LEFT_SHOULDER|XINPUT_GAMEPAD_RIGHT_SHOULDER);
@@ -779,7 +788,12 @@ void installCameraHook(){
 }
 // The original functions are kept per vtable: some setups (windowed-mode mods, d3d9.dll wrappers) recreate the device after
 // startup, sometimes as a different object type with its own vtable, which gets hooked too (see watchD3D9).
-struct HookedTable{void** table;BeginSceneFn begin;EndSceneFn end;PresentFn present;ResetFn reset;};HookedTable hookedTables[4]{};int hookedTableCount=0;
+// begin..reset: what our hooks call next (watchD3D9 may re-chain them); first*: the functions found when the table was hooked.
+// If another mod's hook that chains back to us gets re-chained by watchD3D9, a call would come round to us again: a re-entered hook
+// then goes straight to the first function, so the chain can never loop (a depth counter per hook).
+struct HookedTable{void** table;BeginSceneFn begin;EndSceneFn end;PresentFn present;ResetFn reset;BeginSceneFn firstBegin;EndSceneFn firstEnd;PresentFn firstPresent;ResetFn firstReset;};
+int inBegin=0,inEnd=0,inPresent=0,inReset=0;   // D3D9 calls come from the render thread
+struct Depth{int& d;explicit Depth(int& x):d(x){++d;}~Depth(){--d;}};HookedTable hookedTables[4]{};int hookedTableCount=0;
 HookedTable& tableOf(IDirect3DDevice9* dev){void** t=*reinterpret_cast<void***>(dev);
     for(int i=0;i<hookedTableCount;++i)if(hookedTables[i].table==t)return hookedTables[i];return hookedTables[0];}
 // The device photo mode works with is the game's current one (RwD3D9 device at 0xC97C28), followed if it is recreated.
@@ -788,10 +802,12 @@ bool isMainDevice(IDirect3DDevice9* dev){
     return dev==hooked;
 }
 HRESULT STDMETHODCALLTYPE beginScene(IDirect3DDevice9* dev){
+    if(inBegin)return tableOf(dev).firstBegin(dev);Depth guard(inBegin);
     if(isMainDevice(dev)){if(!beginSeen){log("first BeginScene");beginSeen=true;}installCameraHook();}
     return tableOf(dev).begin(dev);
 }
 HRESULT STDMETHODCALLTYPE endScene(IDirect3DDevice9* dev){
+    if(inEnd)return tableOf(dev).firstEnd(dev);Depth guard(inEnd);
     if(isMainDevice(dev)&&!endSeen){log("first EndScene");endSeen=true;}
     return tableOf(dev).end(dev);
 }
@@ -814,10 +830,12 @@ void diagFrame(){
     lastBeginCalls=beginCalls;lastBeginMain=beginMain;lastDiagSecond=now;
 }
 HRESULT STDMETHODCALLTYPE reset(IDirect3DDevice9* dev,D3DPRESENT_PARAMETERS* params){
+    if(inReset)return tableOf(dev).firstReset(dev,params);Depth guard(inReset);
     if(isMainDevice(dev))releaseDefaultPool();   // D3DPOOL_DEFAULT resources must be gone before IDirect3DDevice9::Reset
     return tableOf(dev).reset(dev,params);
 }
 HRESULT STDMETHODCALLTYPE present(IDirect3DDevice9* dev,const RECT* s,const RECT* d,HWND h,const RGNDATA* r){
+    if(inPresent)return tableOf(dev).firstPresent(dev,s,d,h,r);Depth guard(inPresent);
     if(isMainDevice(dev)){
         ++frameNo;mainThread=GetCurrentThreadId();
         if(!presentSeen){log("first Present");presentSeen=true;if(watchWrites)armWatch();}
@@ -928,7 +946,8 @@ bool hookDeviceTable(IDirect3DDevice9* dev){
     void* b=nullptr;void* e=nullptr;void* p=nullptr;void* rs=nullptr;
     if(!hookSlot(&table[41],reinterpret_cast<void*>(beginScene),&b)||!hookSlot(&table[42],reinterpret_cast<void*>(endScene),&e)||
        !hookSlot(&table[17],reinterpret_cast<void*>(present),&p)||!hookSlot(&table[16],reinterpret_cast<void*>(reset),&rs))return false;
-    hookedTables[hookedTableCount++]={table,reinterpret_cast<BeginSceneFn>(b),reinterpret_cast<EndSceneFn>(e),reinterpret_cast<PresentFn>(p),reinterpret_cast<ResetFn>(rs)};
+    hookedTables[hookedTableCount++]={table,reinterpret_cast<BeginSceneFn>(b),reinterpret_cast<EndSceneFn>(e),reinterpret_cast<PresentFn>(p),reinterpret_cast<ResetFn>(rs),
+        reinterpret_cast<BeginSceneFn>(b),reinterpret_cast<EndSceneFn>(e),reinterpret_cast<PresentFn>(p),reinterpret_cast<ResetFn>(rs)};
     return true;
 }
 // Keeps watching the game's device: a new device with a different vtable gets hooked as well, and if nothing reaches our
@@ -941,13 +960,33 @@ void watchD3D9(){
         if(!known){if(hookDeviceTable(dev))logf("D3D9 hooks added for the game's new device %p (another device type)",static_cast<void*>(dev));}
         if(!presentSeen&&!toldSilent&&GetTickCount64()-start>20000){toldSilent=true;char at[96];
             logf("no Present reached photo mode after 20 s: device %p, Present slot -> %s",static_cast<void*>(dev),where(reinterpret_cast<uintptr_t>(table[17]),at,sizeof(at)));}
-        if(presentSeen&&GetTickCount64()-start>600000)return;   // settled
+        // XG417: without DXVK, F6 stopped working right after the first frame. The keys are read in our Present, so if Present
+        // goes quiet for 3 s, the log says where the slot points now. If another mod rewrote a slot without chaining to us, we
+        // chain to what is there now (it does not call us, or Present would not be quiet) and take the slot back.
+        static unsigned lastFrame=0;static unsigned long long frameSince=0;static bool toldStall=false;
+        unsigned frames=frameNo;unsigned long long now=GetTickCount64();
+        if(frames!=lastFrame){lastFrame=frames;frameSince=now;if(toldStall)logf("Present reaches photo mode again (frame %u)",frames);toldStall=false;}
+        else if(presentSeen&&!toldStall&&now-frameSince>3000&&gameFocused()&&!IsIconic(GetForegroundWindow())){toldStall=true;
+            for(int i=0;i<hookedTableCount;++i){HookedTable& h=hookedTables[i];if(h.table!=table)continue;
+                char at[96];where(reinterpret_cast<uintptr_t>(table[17]),at,sizeof(at));
+                logf("Present has not reached photo mode for 3 s (frame %u, device %p): Present slot -> %s%s",frames,static_cast<void*>(dev),at,
+                    table[17]==reinterpret_cast<void*>(present)?" (still ours)":"");
+                auto retake=[&](int slot,void* ours,auto& chained,const char* name){
+                    if(table[slot]==ours)return;void* now=table[slot];DWORD old;
+                    if(!VirtualProtect(&table[slot],sizeof(void*),PAGE_READWRITE,&old))return;
+                    chained=reinterpret_cast<std::remove_reference_t<decltype(chained)>>(now);table[slot]=ours;   // the chained call first, then the slot
+                    DWORD ignored;VirtualProtect(&table[slot],sizeof(void*),old,&ignored);
+                    char by[96];logf("D3D9 %s slot had been replaced by %s: hooked again, chained to it",name,where(reinterpret_cast<uintptr_t>(now),by,sizeof(by)));};
+                retake(17,reinterpret_cast<void*>(present),h.present,"Present");retake(16,reinterpret_cast<void*>(reset),h.reset,"Reset");
+                retake(41,reinterpret_cast<void*>(beginScene),h.begin,"BeginScene");retake(42,reinterpret_cast<void*>(endScene),h.end,"EndScene");
+            }
+        }
     }
 }
 DWORD WINAPI init(void*){
     GetModuleFileNameW(self,folder,MAX_PATH);wchar_t* slash=wcsrchr(folder,L'\\');if(slash)*slash=0;
     swprintf_s(ini,L"%s\\Aleks.PhotoMode.SA.ini",folder);swprintf_s(logPath,L"%s\\Aleks.PhotoMode.SA.log",folder);
-    hotkey=GetPrivateProfileIntW(L"PhotoMode",L"KeyboardKey",VK_F6,ini);
+    hotkey=iniHotkey=GetPrivateProfileIntW(L"PhotoMode",L"KeyboardKey",VK_F6,ini);
     speed=static_cast<float>(GetPrivateProfileIntW(L"PhotoMode",L"MoveSpeed",12,ini));
     lookSpeed=static_cast<float>(GetPrivateProfileIntW(L"PhotoMode",L"LookSpeed",100,ini));
     maxDistance=static_cast<float>(GetPrivateProfileIntW(L"PhotoMode",L"MaxDistance",160,ini));

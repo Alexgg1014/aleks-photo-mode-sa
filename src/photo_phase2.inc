@@ -14,13 +14,14 @@ constexpr unsigned short OUR_CONTROL_BIT=0x8000;
 
 bool uiHidden=false;   // Triangle / H: hide the whole interface
 int uiLang=LANG_ES;bool kbBoost=false,lastInputKeyboard=false,mouseCentered=false;
-wchar_t soundsDir[MAX_PATH]{},logosDir[MAX_PATH]{},musicDir[MAX_PATH]{};
+wchar_t soundsDir[MAX_PATH]{},logosDir[MAX_PATH]{},musicDir[MAX_PATH]{},framesDir[MAX_PATH]{};
 
 // ---------- folders, sounds, music ----------
 void ensureFolders(){
     struct F{wchar_t* path;const wchar_t* name;const char* readme;};
     F list[]={{soundsDir,L"Sounds","Optional WAV files: menu_open, menu_close, move, tab, select, nochange, shutter.\r\nA missing file is simply silent.\r\n"},
         {logosDir,L"Logos","Put your own logos here (PNG with transparency works best). They appear under COMPONER > LOGO.\r\n"},
+        {framesDir,L"Frames","Full-picture overlays (PNG with transparency, best at 1920x1080). They appear under COMPONER > MARCO DECORATIVO.\r\n"},
         {musicDir,L"Music","Put MP3 or WAV files here. AJUSTES > MUSICA plays the first one while photo mode is open.\r\n"}};
     for(F& f:list){
         swprintf_s(f.path,MAX_PATH,L"%s\\%s",folder,f.name);CreateDirectoryW(f.path,nullptr);
@@ -110,6 +111,23 @@ void scanLogos(){
         do{logoFiles.push_back(fd.cFileName);names.push_back(logoDisplayName(fd.cFileName));}while(FindNextFileW(h,&fd)&&logoFiles.size()<400);FindClose(h);
     }
     menu.setChoices(IT_LOGO,names);
+}
+// ---------- decorative frames (COMPONER > Marco decorativo) ----------
+std::vector<std::wstring> frameFiles;IDirect3DTexture9* frameTex=nullptr;int frameTexIndex=-1;UINT frameW=0,frameH=0;
+void scanFrames(){
+    frameFiles.clear();std::vector<std::string> names{"No"};
+    wchar_t search[MAX_PATH];swprintf_s(search,L"%s\\*.png",framesDir);WIN32_FIND_DATAW fd{};HANDLE h=FindFirstFileW(search,&fd);
+    if(h!=INVALID_HANDLE_VALUE){do{frameFiles.push_back(fd.cFileName);names.push_back(logoDisplayName(fd.cFileName));}while(FindNextFileW(h,&fd)&&frameFiles.size()<200);FindClose(h);}
+    menu.setChoices(IT_OVERLAY,names);
+}
+IDirect3DTexture9* currentFrame(IDirect3DDevice9* dev){
+    int index=menu.choice(IT_OVERLAY)-1;
+    if(index!=frameTexIndex){
+        if(frameTex){frameTex->Release();frameTex=nullptr;}frameTexIndex=index;
+        if(index>=0&&index<static_cast<int>(frameFiles.size())){wchar_t p[MAX_PATH];swprintf_s(p,L"%s\\%s",framesDir,frameFiles[static_cast<size_t>(index)].c_str());
+            frameTex=loadImage(dev,p,2048,frameW,frameH);logf("frame %d: %s",index,frameTex?"loaded":"failed");}
+    }
+    return frameTex;
 }
 IDirect3DTexture9* currentLogo(IDirect3DDevice9* dev){
     int index=menu.choice(IT_LOGO)-1;
@@ -203,7 +221,7 @@ void loadMenu(){
     // Defaults come from the [PhotoMode] keys the Phase 1 INI already had.
     menu.value[IT_MOVE_SPEED]=speed;menu.value[IT_LOOK_SPEED]=lookSpeed;menu.value[IT_MAX_DISTANCE]=maxDistance;
     menu.value[IT_COLLISION]=GetPrivateProfileIntW(L"PhotoMode",L"Collision",1,ini)?1.f:0.f;
-    scanLogos();loadPoseList();
+    scanLogos();scanFrames();loadPoseList();
     for(const MenuItem& i:menu.items){
         if(!*i.key)continue;std::wstring k(i.key,i.key+std::strlen(i.key));wchar_t v[128]{};
         if(readSetting(L"Menu",k.c_str(),v,128)){char a[128]{};WideCharToMultiByte(CP_UTF8,0,v,-1,a,sizeof(a),nullptr,nullptr);menu.load(i.key,a);}
@@ -345,23 +363,39 @@ void restorePedMatrices(){
 // paused think the game runs. SleekMovement's lean/pitch/head-follow then keep turning bones every frame: peds spin, fly and
 // turn their heads. Its 6 checks are "cmp byte [0xB7CB49 m_UserPause],0" (80 3D 49 CB B7 00 00). While photo mode is open those
 // instructions read a byte of ours that is always 1; on exit the original address goes back. Modules: [PhotoMode] PauseModules.
-volatile BYTE photoUserPause=1;struct PausePatch{BYTE* at;};std::vector<PausePatch> pausePatches;
+volatile BYTE photoUserPause=1;struct PausePatch{BYTE* at;uintptr_t original;};std::vector<PausePatch> pausePatches;
 void patchPauseChecks(bool on){
-    if(!on){for(PausePatch& pp:pausePatches){DWORD old;if(VirtualProtect(pp.at,4,PAGE_EXECUTE_READWRITE,&old)){*reinterpret_cast<uintptr_t*>(pp.at)=USER_PAUSE;VirtualProtect(pp.at,4,old,&old);}}
+    if(!on){for(PausePatch& pp:pausePatches){DWORD old;if(VirtualProtect(pp.at,4,PAGE_EXECUTE_READWRITE,&old)){*reinterpret_cast<uintptr_t*>(pp.at)=pp.original;VirtualProtect(pp.at,4,old,&old);}}
         if(!pausePatches.empty())logf("pause checks restored in %u places",static_cast<unsigned>(pausePatches.size()));pausePatches.clear();return;}
-    wchar_t list[256]{};GetPrivateProfileStringW(L"PhotoMode",L"PauseModules",L"SleekMovement.asi",list,256,ini);
-    for(wchar_t* ctx=nullptr,*name=wcstok_s(list,L",; ",&ctx);name;name=wcstok_s(nullptr,L",; ",&ctx)){
-        HMODULE m=GetModuleHandleW(name);if(!m)continue;
+    // Alex: LiveTrafficRadio's NPC radios stuttered, it pauses on m_CodePause too, which photo mode clears for each render phase.
+    // Cattuba: Soundize (Junior_Djjr) kept playing in photo mode; it pauses on the same "cmp byte [m_UserPause],0". Every loaded module
+    // whose file name contains one of these words gets the patch (Soundize's file name has spaces and brackets). Proper Shaders never
+    // does: told "paused", it replays the last frame.
+    wchar_t list[256]{};GetPrivateProfileStringW(L"PhotoMode",L"PauseModules",L"sleekmovement;soundize;skate;trafficradio",list,256,ini);
+    std::vector<std::wstring> words;
+    for(wchar_t* ctx=nullptr,*w=wcstok_s(list,L",;",&ctx);w;w=wcstok_s(nullptr,L",;",&ctx)){
+        std::wstring t=w;while(!t.empty()&&t.front()==L' ')t.erase(t.begin());while(!t.empty()&&t.back()==L' ')t.pop_back();
+        if(t.size()>4&&_wcsicmp(t.c_str()+t.size()-4,L".asi")==0)t.resize(t.size()-4);   // old INI values were file names
+        for(wchar_t& c:t)c=towlower(c);if(!t.empty())words.push_back(t);}
+    std::vector<std::pair<HMODULE,std::wstring>> mods;
+    HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPMODULE,GetCurrentProcessId());
+    if(snap!=INVALID_HANDLE_VALUE){MODULEENTRY32W me{};me.dwSize=sizeof(me);
+        for(BOOL ok=Module32FirstW(snap,&me);ok;ok=Module32NextW(snap,&me)){std::wstring n=me.szModule;for(wchar_t& c:n)c=towlower(c);
+            if(n.find(L"proper")!=std::wstring::npos||me.hModule==self)continue;
+            for(const std::wstring& w:words)if(n.find(w)!=std::wstring::npos){mods.push_back({me.hModule,me.szModule});break;}}
+        CloseHandle(snap);}
+    for(auto& [m,modName]:mods){const wchar_t* name=modName.c_str();
         BYTE* base=reinterpret_cast<BYTE*>(m);auto* dos=reinterpret_cast<IMAGE_DOS_HEADER*>(base);auto* nt=reinterpret_cast<IMAGE_NT_HEADERS*>(base+dos->e_lfanew);
         IMAGE_SECTION_HEADER* sec=IMAGE_FIRST_SECTION(nt);unsigned found=0;
         for(unsigned i=0;i<nt->FileHeader.NumberOfSections;++i,++sec){
             if(!(sec->Characteristics&IMAGE_SCN_MEM_EXECUTE))continue;
             BYTE* p=base+sec->VirtualAddress;size_t n=sec->Misc.VirtualSize;
             for(size_t k=0;k+7<=n;++k){
-                if(p[k]!=0x80||p[k+1]!=0x3D||*reinterpret_cast<uintptr_t*>(p+k+2)!=USER_PAUSE||p[k+6]!=0x00)continue;
+                uintptr_t flag=*reinterpret_cast<uintptr_t*>(p+k+2);   // m_UserPause, or m_CodePause, which photo mode flips every frame (LiveTrafficRadio)
+                if(p[k]!=0x80||p[k+1]!=0x3D||(flag!=USER_PAUSE&&flag!=CODE_PAUSE)||p[k+6]!=0x00)continue;
                 DWORD old;if(!VirtualProtect(p+k+2,4,PAGE_EXECUTE_READWRITE,&old))continue;
                 *reinterpret_cast<uintptr_t*>(p+k+2)=reinterpret_cast<uintptr_t>(&photoUserPause);VirtualProtect(p+k+2,4,old,&old);
-                FlushInstructionCache(GetCurrentProcess(),p+k+2,4);pausePatches.push_back({p+k+2});++found;
+                FlushInstructionCache(GetCurrentProcess(),p+k+2,4);pausePatches.push_back({p+k+2,flag});++found;
             }
         }
         char a[64]{};WideCharToMultiByte(CP_UTF8,0,name,-1,a,sizeof(a),nullptr,nullptr);logf("%s: %u pause checks see photo mode as paused",a,found);
@@ -458,13 +492,15 @@ void applyHeadLook(uintptr_t ped,void* clump){
     BYTE* h=reinterpret_cast<BYTE*>(reinterpret_cast<void* (__cdecl*)(void*)>(FN_HIERARCHY_FROM_SKIN_CLUMP)(clump));if(!h)return;
     int nodes=mem<int>(reinterpret_cast<uintptr_t>(h)+4);BYTE* mats=mem<BYTE*>(reinterpret_cast<uintptr_t>(h)+8);BYTE* info=mem<BYTE*>(reinterpret_cast<uintptr_t>(h)+0x10);
     if(nodes<=0||nodes>128||!mats||!info)return;
-    int head=reinterpret_cast<int (__cdecl*)(void*,int)>(FN_HANIM_ID_INDEX)(h,5);   // 5 = head (with brows and jaw under it); 8 is only the jawif(head<0||head>=nodes)return;
+    int head=reinterpret_cast<int (__cdecl*)(void*,int)>(FN_HANIM_ID_INDEX)(h,5);   // 5 = head (with brows and jaw under it); 8 is only the jaw
+    if(head<0||head>=nodes)return;
     int parent[128];int stack[64];int sp=0,current=-1;
     for(int i=0;i<nodes;++i){parent[i]=current;int fl=*reinterpret_cast<int*>(info+i*16+8);
         if(fl&2){if(sp<64)stack[sp++]=current;}
         if(fl&1)current=sp>0?stack[--sp]:-1;else current=i;}
     bool inHead[128]={};inHead[head]=true;for(int i=head+1;i<nodes;++i)inHead[i]=parent[i]>=0&&inHead[parent[i]];
     BYTE* m=mem<BYTE*>(ped+0x14);if(!m)return;Vec3 facing=*reinterpret_cast<Vec3*>(m+0x10);
+    {float a=menu.value[IT_CJ_TURN]*PI/180.f,cs=std::cos(a),sn=std::sin(a);facing={facing.x*cs-facing.y*sn,facing.x*sn+facing.y*cs,facing.z};}   // Girar a CJ
     Vec3 pivot=*reinterpret_cast<Vec3*>(mats+head*64+0x30);
     Vec3 from=normalized(Vec3{facing.x,facing.y,0}),to=limited_look(facing,sub(pose.pos,pivot),1.22f,0.52f);
     Vec3 axis=cross(from,to);float s=length(axis),c=dot(from,to);if(s<1e-4f)return;axis=mul(axis,1.f/s);
@@ -473,6 +509,33 @@ void applyHeadLook(uintptr_t ped,void* clump){
         Vec3& p=*reinterpret_cast<Vec3*>(mi+0x30);p=add(pivot,rotate_axis(sub(p,pivot),axis,c,s));}
 }
 void settlePoseOnGround(uintptr_t ped,void* clump);
+// COMPONER > Girar a CJ: the frozen skeleton is turned about CJ's position each frame after it is put back (the bone matrices are world
+// space, so this is all the renderer sees). Turning his CMatrix did not reach the skeleton.
+void turnSkeleton(uintptr_t ped,void* clump){
+    float deg=menu.value[IT_CJ_TURN];if(deg==0)return;
+    BYTE* h=reinterpret_cast<BYTE*>(reinterpret_cast<void* (__cdecl*)(void*)>(FN_HIERARCHY_FROM_SKIN_CLUMP)(clump));if(!h)return;
+    int nodes=mem<int>(reinterpret_cast<uintptr_t>(h)+4);BYTE* mats=mem<BYTE*>(reinterpret_cast<uintptr_t>(h)+8);if(nodes<=0||nodes>128||!mats)return;
+    Vec3 c=*pedPos(ped);float a=deg*PI/180.f,cs=std::cos(a),sn=std::sin(a);
+    auto rot=[&](Vec3& v){float x=v.x*cs-v.y*sn,y=v.x*sn+v.y*cs;v.x=x;v.y=y;};
+    for(int i=0;i<nodes;++i){BYTE* mi=mats+i*64;for(int r=0;r<3;++r)rot(*reinterpret_cast<Vec3*>(mi+r*16));
+        Vec3& p=*reinterpret_cast<Vec3*>(mi+0x30);Vec3 d=sub(p,c);rot(d);p=add(c,d);}
+}
+// eCoJ: dead and staggered NPCs vanished while photo mode was open and came back on exit. Rebuilding a dying or hit-reaction
+// pose can leave bone matrices that are not finite or far from the ped, which the game then draws nowhere. Dying/dead peds keep
+// the skeleton the game last gave them (they do not move anyway), and any rebuilt skeleton that fails the check goes back to it.
+constexpr int PEDSTATE_DIE=54,PEDSTATE_DEAD=55,PEDSTATE_DIE_BY_STEALTH=56;unsigned pedBadRebuilds=0,pedDeadKept=0;
+BYTE* skeletonMatrices(void* clump,int& nodes){
+    BYTE* h=reinterpret_cast<BYTE*>(reinterpret_cast<void* (__cdecl*)(void*)>(FN_HIERARCHY_FROM_SKIN_CLUMP)(clump));nodes=0;if(!h)return nullptr;
+    nodes=mem<int>(reinterpret_cast<uintptr_t>(h)+4);BYTE* m=mem<BYTE*>(reinterpret_cast<uintptr_t>(h)+8);
+    if(nodes<=0||nodes>128||!m){nodes=0;return nullptr;}return m;
+}
+bool skeletonLooksRight(uintptr_t ped,const BYTE* m,int nodes){
+    Vec3 at=*pedPos(ped);
+    for(int i=0;i<nodes;++i){const float* f=reinterpret_cast<const float*>(m+i*64);
+        for(int k=0;k<15;++k)if((k&3)!=3&&!std::isfinite(f[k]))return false;   // not the RwMatrix flags/pad words
+        Vec3 p{f[12],f[13],f[14]};if(length(sub(p,at))>4.f)return false;}
+    return true;
+}
 unsigned cjRestores=0,cjRefreshVisits=0;   // diagnostics: how often refreshPedPoses reached CJ and put his skeleton back
 void refreshPedPoses(){
     if(!fixPedPoses){if(!pedMatricesTaken)restorePedMatrices();return;}   // the snapshot is always taken when the world stops
@@ -484,12 +547,40 @@ void refreshPedPoses(){
         if(length(sub(*pedPos(ped),cam))>120.f){++pedSkipFar;return;}
         if(!reinterpret_cast<void* (__cdecl*)(void*)>(FN_CLUMP_HAS_ANIM)(clump)){++pedSkipNoAnim;return;}
         bool isCj=ped==reinterpret_cast<uintptr_t>(playerPed());if(isCj)++cjRefreshVisits;
-        if(!slowmoActive&&restoreSkeleton(ped,clump)){++n;if(isCj){++cjRestores;if(lookAtCamera)applyHeadLook(ped,clump);}return;}   // frozen: same skeleton as the first frame
+        if(!slowmoActive&&restoreSkeleton(ped,clump)){++n;if(isCj){++cjRestores;turnSkeleton(ped,clump);if(lookAtCamera)applyHeadLook(ped,clump);}return;}   // frozen: same skeleton as the first frame
+        int state=mem<int>(ped+0x530);
+        // Dead/dying peds and anyone on a bike or in a car keep the skeleton the game gave them: rebuilding a riding pose stretched CJ's
+        // jacket "to the sky" (frnchise), a dying one made bodies vanish (eCoJ).
+        bool riding=mem<uintptr_t>(ped+0x58C)!=0;
+        if(!slowmoActive&&(riding||(!isCj&&(state==PEDSTATE_DIE||state==PEDSTATE_DEAD||state==PEDSTATE_DIE_BY_STEALTH)))){saveSkeleton(ped,clump);++pedDeadKept;++n;return;}
+        int nodes=0;BYTE* mats=skeletonMatrices(clump,nodes);std::vector<BYTE> before;if(mats)before.assign(mats,mats+static_cast<size_t>(nodes)*64);
         reinterpret_cast<void (__cdecl*)(void*,float,bool)>(FN_CLUMP_UPDATE_ANIMS)(clump,0.f,true);++n;
-        if(!slowmoActive){rebuildBoneMatrices(ped,clump);if(isCj)settlePoseOnGround(ped,clump);saveSkeleton(ped,clump);if(isCj&&lookAtCamera)applyHeadLook(ped,clump);}
+        if(!slowmoActive){rebuildBoneMatrices(ped,clump);
+            if(!isCj&&mats&&!before.empty()&&!skeletonLooksRight(ped,mats,nodes)){std::memcpy(mats,before.data(),before.size());++pedBadRebuilds;}
+            if(isCj)settlePoseOnGround(ped,clump);saveSkeleton(ped,clump);if(isCj){turnSkeleton(ped,clump);if(lookAtCamera)applyHeadLook(ped,clump);}}
     });
     pedRefreshMax=std::max(pedRefreshMax,n);
 }
+// ---------- COMPONER > Girar a CJ ----------
+// Turns CJ about his own position: his CMatrix, the frozen snapshot of it and his heading (CPed+0x558 current, +0x55C goal); his
+// skeleton is then rebuilt for the new facing on the next refresh. Closing photo mode turns him back.
+float appliedCjTurn=0;
+void turnCj(float degrees){
+    BYTE* ped=playerPed();if(!ped||degrees==0)return;BYTE* m=mem<BYTE*>(reinterpret_cast<uintptr_t>(ped)+0x14);if(!m)return;
+    float a=degrees*PI/180.f,c=std::cos(a),sn=std::sin(a);
+    auto rot=[&](BYTE* mat){for(int row=0;row<2;++row){Vec3& v=*reinterpret_cast<Vec3*>(mat+row*16);float x=v.x*c-v.y*sn,y=v.x*sn+v.y*c;v.x=x;v.y=y;}};
+    rot(m);auto it=pedMatrices.find(reinterpret_cast<uintptr_t>(ped));if(it!=pedMatrices.end())rot(it->second.m);
+    *reinterpret_cast<float*>(ped+0x558)+=a;*reinterpret_cast<float*>(ped+0x55C)+=a;
+    reinterpret_cast<void (__thiscall*)(void*)>(FN_ENTITY_UPDATE_RW_FRAME)(ped);
+    savedSkeletons.erase(reinterpret_cast<uintptr_t>(ped));
+}
+void splitToneFollowsHue(){
+    static float lastS=-1,lastH=-1;float s=menu.value[IT_SPLIT_SHADOW_HUE],h=menu.value[IT_SPLIT_HIGH_HUE];
+    if(lastS>=0&&s!=lastS&&menu.value[IT_SPLIT_SHADOW_AMOUNT]==0)menu.value[IT_SPLIT_SHADOW_AMOUNT]=40;
+    if(lastH>=0&&h!=lastH&&menu.value[IT_SPLIT_HIGH_AMOUNT]==0)menu.value[IT_SPLIT_HIGH_AMOUNT]=40;
+    lastS=s;lastH=h;}
+void applyCjTurn(){}   // the skeleton is turned in refreshPedPoses (turnSkeleton)
+void resetCjTurn(){if(appliedCjTurn!=0)turnCj(-appliedCjTurn);appliedCjTurn=0;menu.value[IT_CJ_TURN]=0;}
 // CGame::Process call in Idle (0x53E981, usually chained through CLEO): with slow motion the world and TheCamera.Process run,
 // so the photo pose is written again right after it, before CRenderer::ConstructRenderList.
 DrawFn priorGameProcess=nullptr;
@@ -504,21 +595,21 @@ void passiveFlyingProbe();
 // light pass kept showing an old colour and position, or nothing, while car headlights were in view. Without Proper (or without
 // its depth buffer) they go into the game's own light list right before the scene is drawn (CPointLights::AddLight 0x7000E0).
 constexpr uintptr_t FN_ADD_POINT_LIGHT=0x7000E0,POINT_LIGHT_COUNT=0xC3F0D0;
-struct PhotoLight{bool placed=false;bool on=false;Vec3 pos{},dir{0,0,0};int type=0,color=0;float intensity=60,range=10,hue=30,sat=60;};PhotoLight photoLights[PHOTO_LIGHTS];   // type: 0 point, 1 spotlight, 2 camera flash
+struct PhotoLight{bool placed=false;bool on=false;Vec3 pos{},dir{0,0,0};int type=0,color=0;float intensity=60,range=10,hue=30,sat=60,val=100,cone=36,soft=45;};PhotoLight photoLights[PHOTO_LIGHTS];   // type: 0 point, 1 spotlight, 2 camera flash
 int lightSlotShown=-1;unsigned ourLightsBase=0,ourLightsCount=0;
-// A preset colour, or LUCES > Tono / Pureza del color when Color is Personalizado.
-Rgb lightRgb(const PhotoLight& l){if(l.color==LIGHT_COLOR_CUSTOM)return hueColor(l.hue,l.sat/100.f);const LightColor& c=lightColors[l.color];return {c.r,c.g,c.b};}
+// A preset colour, or the picker's hue / purity / brightness when Color is Personalizado.
+Rgb lightRgb(const PhotoLight& l){if(l.color==LIGHT_COLOR_CUSTOM)return hsvColor(l.hue,l.sat/100.f,l.val/100.f);const LightColor& c=lightColors[l.color];return {c.r,c.g,c.b};}
 void syncLightMenu(){
     int slot=std::clamp(menu.choice(IT_LIGHT_SLOT),0,PHOTO_LIGHTS-1);PhotoLight& l=photoLights[slot];
     if(slot!=lightSlotShown){   // show the chosen light's values
         lightSlotShown=slot;menu.value[IT_LIGHT_ON]=l.on?1.f:0.f;menu.value[IT_LIGHT_TYPE]=static_cast<float>(l.type);menu.value[IT_LIGHT_COLOR]=static_cast<float>(l.color);
-        menu.value[IT_LIGHT_INTENSITY]=l.intensity;menu.value[IT_LIGHT_RANGE]=l.range;menu.value[IT_LIGHT_HUE]=l.hue;menu.value[IT_LIGHT_SAT]=l.sat;return;}
+        menu.value[IT_LIGHT_INTENSITY]=l.intensity;menu.value[IT_LIGHT_RANGE]=l.range;menu.value[IT_LIGHT_HUE]=l.hue;menu.value[IT_LIGHT_SAT]=l.sat;menu.value[IT_LIGHT_VAL]=l.val;menu.value[IT_LIGHT_CONE]=l.cone;menu.value[IT_LIGHT_SOFT]=l.soft;return;}
     bool on=menu.on(IT_LIGHT_ON);l.type=std::clamp(menu.choice(IT_LIGHT_TYPE),0,2);
     if(on&&!l.placed&&l.type!=2){menu.value[IT_LIGHT_ON]=0;noticeFor("Primero coloca la luz");on=false;}
-    // Touching Tono or Pureza switches the light to the custom colour, so the change is seen right away.
-    if(menu.value[IT_LIGHT_HUE]!=l.hue||menu.value[IT_LIGHT_SAT]!=l.sat)menu.value[IT_LIGHT_COLOR]=static_cast<float>(LIGHT_COLOR_CUSTOM);
+    // A new hue / purity / brightness switches the light to the custom colour, so the change is seen right away.
+    if(menu.value[IT_LIGHT_HUE]!=l.hue||menu.value[IT_LIGHT_SAT]!=l.sat||menu.value[IT_LIGHT_VAL]!=l.val)menu.value[IT_LIGHT_COLOR]=static_cast<float>(LIGHT_COLOR_CUSTOM);
     l.on=on;l.color=std::clamp(menu.choice(IT_LIGHT_COLOR),0,LIGHT_COLOR_COUNT-1);l.intensity=menu.value[IT_LIGHT_INTENSITY];l.range=menu.value[IT_LIGHT_RANGE];
-    l.hue=menu.value[IT_LIGHT_HUE];l.sat=menu.value[IT_LIGHT_SAT];
+    l.hue=menu.value[IT_LIGHT_HUE];l.sat=menu.value[IT_LIGHT_SAT];l.val=menu.value[IT_LIGHT_VAL];l.cone=menu.value[IT_LIGHT_CONE];l.soft=menu.value[IT_LIGHT_SOFT];
 }
 void placeLight(){
     int slot=std::clamp(menu.choice(IT_LIGHT_SLOT),0,PHOTO_LIGHTS-1);PhotoLight& l=photoLights[slot];
@@ -569,6 +660,25 @@ void lightMoveFrame(){
     pose.pos=moveAnchorPos;yaw=moveAnchorYaw;pitch=moveAnchorPitch;   // the camera does not move
     Basis g=with_handedness(basis_from_angles(yaw,pitch,roll),gameHandedness);pose.right=g.right;pose.forward=g.forward;pose.up=g.up;
 }
+// ---------- SimpleDepthBuffer (peter_99), optional ----------
+// SimpleDepthBuffer.SA.asi captures the scene depth every frame and shares it: a linear R32F texture at the back buffer's size
+// (view-space Z in world units, sky = far plane). Photo mode uses it for its depth of field and, without Proper Shaders, for its
+// lights and shadows. Soft dependency: resolved with GetProcAddress on first use, everything still works without it.
+struct SdbApi{int (__cdecl* GetVersion)()=nullptr;bool (__cdecl* IsAvailable)()=nullptr;IDirect3DTexture9* (__cdecl* GetLinearDepth)()=nullptr;
+    void (__cdecl* GetClipPlanes)(float*,float*)=nullptr;};
+SdbApi sdb;int sdbState=0;   // 0 not checked, 1 loaded, -1 missing
+bool sdbLoaded(){
+    if(!sdbState){sdbState=-1;HMODULE m=GetModuleHandleW(L"SimpleDepthBuffer.SA.asi");
+        if(m){sdb.GetVersion=reinterpret_cast<int (__cdecl*)()>(GetProcAddress(m,"SimpleDepthBuffer_GetVersion"));
+            sdb.IsAvailable=reinterpret_cast<bool (__cdecl*)()>(GetProcAddress(m,"SimpleDepthBuffer_IsAvailable"));
+            sdb.GetLinearDepth=reinterpret_cast<IDirect3DTexture9* (__cdecl*)()>(GetProcAddress(m,"SimpleDepthBuffer_GetLinearDepth"));
+            sdb.GetClipPlanes=reinterpret_cast<void (__cdecl*)(float*,float*)>(GetProcAddress(m,"SimpleDepthBuffer_GetClipPlanes"));
+            if(sdb.GetVersion&&sdb.GetVersion()>=1&&sdb.IsAvailable&&sdb.GetLinearDepth&&sdb.GetClipPlanes)sdbState=1;}
+        logf("SimpleDepthBuffer: %s",sdbState>0?"found (depth of field, and lights without Proper Shaders)":"not installed");}
+    return sdbState>0;
+}
+// This frame's linear depth, or null (not installed, MSAA on, device reset). Never kept across frames (D3DPOOL_DEFAULT).
+IDirect3DTexture9* sdbDepth(){return sdbLoaded()&&sdb.IsAvailable()?sdb.GetLinearDepth():nullptr;}
 // ---------- which path draws the lights ----------
 // Proper Shaders exports, checked in ProperShaders.asi 10-26 (md5 ecbc96ef): PS_GetDepthBuffer (RVA 0x27670) is
 // "mov eax,[texture]; ret", no arguments: the IDirect3DTexture9 it renders the scene's depth into (INTZ, hardware z, created
@@ -598,7 +708,8 @@ bool properDepthReady(){
     }
     return properDepthState>0;
 }
-bool shaderLights(){return properDepthReady()&&!shaderLightsBroken;}
+// Proper's depth first (it also has smooth normals); else SimpleDepthBuffer's linear depth, so the lights work with any renderer.
+bool shaderLights(){return (properDepthReady()||sdbLoaded())&&!shaderLightsBroken;}
 bool properReversedDepth(){return psReversedDepth?(psReversedDepth()&0xFF)!=0:properReversedIni;}
 // ---------- without Proper: the game's light list ----------
 // Ours go to the front of CPointLights::aLights (0xC3F0E0, 0x30 bytes each): with many street lamps in view a renderer that only
@@ -704,6 +815,24 @@ void restoreHandWeapon(){
     if(weaponTouched){if(BYTE* ped=playerPed())setHandModel(ped,originalWeaponModel);}
     weaponTouched=false;appliedWeaponChoice=0;originalWeaponModel=-1;
 }
+// ---------- muzzle flash (COMPONER > Fogonazo del arma) ----------
+// frnchise / XTC, like Cyberpunk's "Muzzle flash": the flash the weapon model already carries (its gunflash frame, CPed+0x4F8) lit as
+// in a shot. CPed::DoGunFlash (0x5DF340, thiscall, ret 8: lifetime, left hand) sets its alpha (CPed+0x504 for the right hand) and gives
+// it a random spin; while photo mode is open that alpha is put back every frame, so the flash never fades.
+constexpr uintptr_t FN_DO_GUN_FLASH=0x5DF340,PED_GUNFLASH_ALPHA=0x504;short flashAlpha=0;int flashModel=-2;
+void applyMuzzleFlash(){
+    return;   // replaced by drawMuzzleFlash (our own sprite); kept so clearMuzzleFlash still resets a native flash
+    BYTE* ped=playerPed();if(!ped)return;
+    short& alpha=*reinterpret_cast<short*>(ped+PED_GUNFLASH_ALPHA);
+    if(!menu.on(IT_MUZZLE_FLASH)){if(flashModel!=-2){alpha=0;flashModel=-2;flashAlpha=0;}return;}
+    int model=*reinterpret_cast<int*>(ped+PED_WEAPON_MODEL);
+    if(model!=flashModel){flashModel=model;flashAlpha=0;
+        if(mem<void*>(reinterpret_cast<uintptr_t>(ped)+0x4F4)&&mem<void*>(reinterpret_cast<uintptr_t>(ped)+0x4F8)
+            ){reinterpret_cast<bool (__thiscall*)(void*,int,bool)>(FN_DO_GUN_FLASH)(ped,60,false);flashAlpha=alpha;}
+        logf("muzzle flash: weapon model %d -> %s",model,flashAlpha>0?"lit":"no flash on this model");}
+    if(flashAlpha>0)alpha=flashAlpha;
+}
+void clearMuzzleFlash(){if(flashModel!=-2){if(BYTE* ped=playerPed())*reinterpret_cast<short*>(ped+PED_GUNFLASH_ALPHA)=0;}flashModel=-2;flashAlpha=0;}
 // ---------- CJ expression (COMPONER > Expresión) ----------
 // A facial animation from ped.ifp added on top as a partial animation (flags partial | looped | started), frozen at its middle.
 BYTE* expressionAssoc=nullptr;int appliedExpression=0;
@@ -787,13 +916,15 @@ void phase2Open(){
     clockChanged=weatherChanged=false;appliedTime=-1;appliedWeather=0;playerHidden=false;slowmoActive=false;
     // Time, weather and slow motion always start from the live game; the look (FX, grid, frame, logo) is remembered.
     menu.value[IT_TIME]=-0.5f;menu.value[IT_WEATHER]=0;menu.value[IT_SLOWMO]=0;menu.value[IT_POSE]=0;menu.value[IT_POSE_FRAME]=50;appliedPoseIndex=0;appliedPoseFrame=50;clearLights();ourLightsCount=0;lightNear=lightFar=0;lightPassLogged=false;menu.value[IT_LIGHT_SLOT]=0;frameStepState=0;menu.value[IT_HIDE_PEOPLE]=0;menu.value[IT_EXPRESSION]=0;menu.value[IT_LOOK_AT]=0;appliedExpression=0;expressionAssoc=nullptr;orbitReady=false;cutsceneCameraFree=inCutsceneSession&&menu.choice(IT_CUTSCENE_CAMERA)==1&&mem<int>(CURRENT_AREA)==0;
-    menu.open=false;viewing=false;confirmDelete=false;uiHidden=false;mouseCentered=false;scanLogos();setupSkyGfxRow();musicStart();sessionOpenedAt=GetTickCount64();passiveProbeStep=0;patchPauseChecks(true);pauseSleekFootIk(true);
+    menu.open=false;viewing=false;confirmDelete=false;uiHidden=false;mouseCentered=false;scanLogos();scanFrames();setupSkyGfxRow();musicStart();sessionOpenedAt=GetTickCount64();passiveProbeStep=0;patchPauseChecks(true);pauseSleekFootIk(true);
     fixPedPoses=GetPrivateProfileIntW(L"PhotoMode",L"FixPedPoses",1,ini)!=0;
     pedPoseTiming=static_cast<int>(GetPrivateProfileIntW(L"Diag",L"PedPoseTiming",1,ini));
 }
+void closePicker(bool keep);void closeFlashEdit(bool keep);
 void phase2Close(){
+    closePicker(false);closeFlashEdit(false);   // a panel left open must not come back with the next session
     if(frameStepState==2&&inCutsceneSession)holdCutscene(true);frameStepState=0;clearLights();
-    applyHidePeople(false);clearCjExpression();restoreHandWeapon();menu.value[IT_WEAPON]=0;
+    applyHidePeople(false);clearCjExpression();clearMuzzleFlash();menu.value[IT_MUZZLE_FLASH]=0;resetCjTurn();restoreHandWeapon();menu.value[IT_WEAPON]=0;
     clearCjPose();
     restoreSkyGfx();
     freezeAnimations(false);
@@ -801,8 +932,8 @@ void phase2Close(){
     patchPauseChecks(false);
     forgetSkeletons();
     pauseSleekFootIk(false);
-    logf("ped poses: fix=%d timing=%d refresh calls=%u, most peds in one call=%u, skipped no-clump=%u far=%u no-anim=%u, matrices put back=%u (of %u peds)",fixPedPoses,pedPoseTiming,pedRefreshCalls,pedRefreshMax,pedSkipNoClump,pedSkipFar,pedSkipNoAnim,pedMatrixRestores,static_cast<unsigned>(pedMatrices.size()));
-    pedRefreshCalls=pedRefreshMax=pedSkipNoClump=pedSkipFar=pedSkipNoAnim=pedMatrixRestores=0;pedMatrices.clear();pedMatricesTaken=false;
+    logf("ped poses: fix=%d timing=%d refresh calls=%u, most peds in one call=%u, skipped no-clump=%u far=%u no-anim=%u, matrices put back=%u (of %u peds), dead kept=%u, bad rebuilds undone=%u",fixPedPoses,pedPoseTiming,pedRefreshCalls,pedRefreshMax,pedSkipNoClump,pedSkipFar,pedSkipNoAnim,pedMatrixRestores,static_cast<unsigned>(pedMatrices.size()),pedDeadKept,pedBadRebuilds);
+    pedRefreshCalls=pedRefreshMax=pedSkipNoClump=pedSkipFar=pedSkipNoAnim=pedMatrixRestores=pedDeadKept=pedBadRebuilds=0;pedMatrices.clear();pedMatricesTaken=false;
     if(slowmoActive){mem<float>(TIME_SCALE)=savedTimeScale;playerControls()&=static_cast<unsigned short>(~OUR_CONTROL_BIT);slowmoActive=false;}
     if(playerHidden){BYTE* ped=playerPed();if(ped&&playerWasVisible)ped[ENTITY_FLAGS]|=0x80;playerHidden=false;}
     bool refresh=clockChanged||weatherChanged;
@@ -812,6 +943,154 @@ void phase2Close(){
     musicStop();menu.open=false;viewing=false;saveMenu();
 }
 
+// ---------- muzzle flash sprite (COMPONER > Fogonazo del arma) ----------
+// The game's own flash needs a "gunflash" frame inside the weapon model, and weapon mods (Immersive Weapons Pack) often have none,
+// so photo mode draws its own: a star-shaped burst at the muzzle, part of the photo. The muzzle is CJ's right hand (bone 25) plus the
+// weapon's fire offset (CWeaponInfo +0x24, in the hand's axes); X on the row opens a panel to move, size and turn it, because modded
+// weapons are longer or shorter than the originals.
+IDirect3DTexture9* flashTex=nullptr;
+IDirect3DTexture9* flashTexture(IDirect3DDevice9* dev){
+    if(flashTex)return flashTex;const int S=128;
+    if(FAILED(dev->CreateTexture(S,S,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&flashTex,nullptr))||!flashTex){flashTex=nullptr;return nullptr;}
+    D3DLOCKED_RECT r{};if(FAILED(flashTex->LockRect(0,&r,nullptr,0)))return flashTex;
+    for(int y=0;y<S;++y){DWORD* row=reinterpret_cast<DWORD*>(static_cast<BYTE*>(r.pBits)+y*r.Pitch);
+        for(int x=0;x<S;++x){float dx=(x+0.5f)/S*2-1,dy=(y+0.5f)/S*2-1,rr=std::sqrt(dx*dx+dy*dy),a=std::atan2(dy,dx);
+            float spikes=std::pow(std::fabs(std::cos(a*3)),12.f)*0.75f+std::pow(std::fabs(std::cos(a*5+0.4f)),30.f)*0.45f;   // 6 long and 10 thin rays
+            float core=std::exp(-rr*rr*28),glow=std::exp(-rr*rr*6)*0.55f,ray=spikes*std::max(0.f,1-rr)*std::max(0.f,1-rr);
+            float v=std::min(1.f,core+glow+ray);
+            float cr=1,cg=0.55f+0.45f*core,cb=0.15f+0.8f*core;   // white-hot centre, orange edges
+            auto b=[](float f){return static_cast<DWORD>(std::clamp(f,0.f,1.f)*255.f+0.5f);};
+            row[x]=(b(v)<<24)|(b(cr)<<16)|(b(cg)<<8)|b(cb);}}
+    flashTex->UnlockRect(0);return flashTex;
+}
+// Where the muzzle is, in world space, or false (no CJ, no weapon, no skeleton).
+bool handAxes(Vec3& rt,Vec3& up,Vec3& fw,Vec3& pos);
+bool muzzlePosition(Vec3& at,Vec3& along){
+    BYTE* ped=playerPed();if(!ped)return false;void* clump=playerClump();if(!clump)return false;
+    int type=weaponChoices[std::clamp(menu.choice(IT_WEAPON),0,WEAPON_CHOICE_COUNT-1)].type;
+    if(type<0){BYTE slot=*reinterpret_cast<BYTE*>(ped+0x718);type=*reinterpret_cast<int*>(ped+0x5A0+slot*0x1C);}   // what he holds
+    if(type<=0||*reinterpret_cast<int*>(ped+PED_WEAPON_MODEL)<=0)return false;
+    BYTE* info=reinterpret_cast<BYTE*>(reinterpret_cast<void* (__cdecl*)(int,int)>(FN_WEAPON_INFO)(type,1));
+    Vec3 fire=info?*reinterpret_cast<Vec3*>(info+0x24):Vec3{0.5f,0,0.1f};
+    BYTE* h=reinterpret_cast<BYTE*>(reinterpret_cast<void* (__cdecl*)(void*)>(FN_HIERARCHY_FROM_SKIN_CLUMP)(clump));if(!h)return false;
+    int nodes=mem<int>(reinterpret_cast<uintptr_t>(h)+4);BYTE* mats=mem<BYTE*>(reinterpret_cast<uintptr_t>(h)+8);if(!mats)return false;
+    int hand=reinterpret_cast<int (__cdecl*)(void*,int)>(FN_HANIM_ID_INDEX)(h,25);if(hand<0||hand>=nodes)return false;
+    const BYTE* m=mats+hand*64;Vec3 rt=*reinterpret_cast<const Vec3*>(m),up=*reinterpret_cast<const Vec3*>(m+0x10),fw=*reinterpret_cast<const Vec3*>(m+0x20),pos=*reinterpret_cast<const Vec3*>(m+0x30);
+    float fx=fire.x+menu.value[IT_FLASH_FORWARD],fy=fire.y+menu.value[IT_FLASH_SIDE],fz=fire.z+menu.value[IT_FLASH_UP];
+    at=add(pos,add(add(mul(rt,fx),mul(up,fy)),mul(fw,fz)));along=normalized(rt);
+    return std::isfinite(at.x)&&std::isfinite(at.y)&&std::isfinite(at.z);
+}
+void drawMuzzleFlash(IDirect3DDevice9* dev,float w,float h){
+    if(!menu.on(IT_MUZZLE_FLASH))return;Vec3 at{},along{};if(!muzzlePosition(at,along))return;
+    IDirect3DTexture9* tex=flashTexture(dev);if(!tex)return;
+    Basis b=basis_from_angles(yaw,pitch,roll);float tanV=std::tan(renderFov()*PI/360.f)*0.75f,aspect=w/h;
+    Vec3 d=sub(at,pose.pos);float z=dot(d,b.forward);if(z<0.2f)return;
+    float sx=w*0.5f+dot(d,b.right)/z/(tanV*aspect)*w*0.5f,sy=h*0.5f-dot(d,b.up)/z/tanV*h*0.5f;
+    float size=menu.value[IT_FLASH_SIZE]/z/tanV*h*0.5f;   // metres at that distance, in pixels
+    float a=menu.value[IT_FLASH_ROLL]*PI/180.f+std::atan2(-dot(along,b.up),dot(along,b.right)),cs=std::cos(a),sn=std::sin(a);
+    float x[4],y[4];const float px[4]={-1,1,1,-1},py[4]={-0.55f,-0.55f,0.55f,0.55f};   // wider along the barrel
+    for(int i=0;i<4;++i){x[i]=sx+(px[i]*cs-py[i]*sn)*size;y[i]=sy+(px[i]*sn+py[i]*cs)*size;}
+    dev->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);dev->SetRenderState(D3DRS_SRCBLEND,D3DBLEND_SRCALPHA);dev->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_ONE);   // additive glow
+    TexVertex v[]={{x[0]-0.5f,y[0]-0.5f,0,1,0xFFFFFFFF,0,0},{x[1]-0.5f,y[1]-0.5f,0,1,0xFFFFFFFF,1,0},{x[3]-0.5f,y[3]-0.5f,0,1,0xFFFFFFFF,0,1},{x[2]-0.5f,y[2]-0.5f,0,1,0xFFFFFFFF,1,1}};
+    dev->SetTexture(0,tex);dev->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_MODULATE);dev->SetTextureStageState(0,D3DTSS_COLORARG1,D3DTA_TEXTURE);dev->SetTextureStageState(0,D3DTSS_COLORARG2,D3DTA_DIFFUSE);
+    dev->SetTextureStageState(0,D3DTSS_ALPHAOP,D3DTOP_MODULATE);dev->SetTextureStageState(0,D3DTSS_ALPHAARG1,D3DTA_TEXTURE);dev->SetTextureStageState(0,D3DTSS_ALPHAARG2,D3DTA_DIFFUSE);
+    dev->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);dev->SetSamplerState(0,D3DSAMP_MAGFILTER,D3DTEXF_LINEAR);
+    dev->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE|D3DFVF_TEX1);
+    for(float left=menu.value[IT_FLASH_INTENSITY];left>0.01f;left-=1.f){   // Intensidad above 1 adds a second pass
+        BYTE g=static_cast<BYTE>(std::min(1.f,left)*255.f);DWORD c=0xFF000000u|(g<<16)|(g<<8)|g;for(TexVertex& q:v)q.color=c;
+        dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,v,sizeof(TexVertex));}
+    dev->SetTexture(0,nullptr);dev->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_SELECTARG1);dev->SetTextureStageState(0,D3DTSS_COLORARG1,D3DTA_DIFFUSE);
+    dev->SetTextureStageState(0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG1);dev->SetTextureStageState(0,D3DTSS_ALPHAARG1,D3DTA_DIFFUSE);dev->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE);
+    dev->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_INVSRCALPHA);
+}
+// The adjust panel: X / Enter on the row (it also turns the flash on). Pad: left stick = forward/back and sideways, L2 / R2 = down/up,
+// L1 / R1 = size, right stick = roll. Keyboard: WASD, arrows up/down, Q / E. X / Enter keeps it, Circle / Esc puts it back.
+struct FlashEdit{bool open=false;unsigned openedFrame=0;float before[5]{};};FlashEdit flashEdit;
+const ItemId flashRows[6]={IT_FLASH_FORWARD,IT_FLASH_UP,IT_FLASH_SIDE,IT_FLASH_SIZE,IT_FLASH_ROLL,IT_FLASH_INTENSITY};
+bool handAxes(Vec3& rt,Vec3& up,Vec3& fw,Vec3& pos){
+    void* clump=playerClump();if(!clump)return false;
+    BYTE* h=reinterpret_cast<BYTE*>(reinterpret_cast<void* (__cdecl*)(void*)>(FN_HIERARCHY_FROM_SKIN_CLUMP)(clump));if(!h)return false;
+    int nodes=mem<int>(reinterpret_cast<uintptr_t>(h)+4);BYTE* mats=mem<BYTE*>(reinterpret_cast<uintptr_t>(h)+8);if(!mats)return false;
+    int hand=reinterpret_cast<int (__cdecl*)(void*,int)>(FN_HANIM_ID_INDEX)(h,25);if(hand<0||hand>=nodes)return false;
+    const BYTE* m=mats+hand*64;rt=*reinterpret_cast<const Vec3*>(m);up=*reinterpret_cast<const Vec3*>(m+0x10);fw=*reinterpret_cast<const Vec3*>(m+0x20);pos=*reinterpret_cast<const Vec3*>(m+0x30);return true;
+}
+bool flashEditOpen(){return flashEdit.open&&menu.open&&menu.tab==TAB_COMPOSE;}
+bool flashEditJustOpened(){return flashEdit.open&&flashEdit.openedFrame==frameNo;}
+void openFlashEdit(){menu.value[IT_MUZZLE_FLASH]=1;for(int i=0;i<6;++i)flashEdit.before[i]=menu.value[flashRows[i]];flashEdit.open=true;flashEdit.openedFrame=frameNo;sound("select");}
+void closeFlashEdit(bool keep){if(!flashEdit.open)return;flashEdit.open=false;if(!keep)for(int i=0;i<6;++i)menu.value[flashRows[i]]=flashEdit.before[i];sound(keep?"select":"menu_close");}
+void flashEditFrame(const PadState& p,unsigned prev,float dt){
+    auto edge=[&](unsigned m){return (p.buttons&m)&&!(prev&m);};auto held=[&](unsigned m){return (p.buttons&m)!=0;};
+    auto nudge=[&](ItemId id,float by){const MenuItem& it=menu.item(id);menu.value[id]=std::clamp(menu.value[id]+by,it.min,it.max);};
+    // Moves as seen on screen: left stick / WASD = screen right/up, L2 / R2 = away from / toward the camera. The motion is turned
+    // into the hand's axes (where the offsets live), so it stays on the weapon when CJ or the camera turns.
+    float lx=deadzone(p.lx),ly=deadzone(p.ly),rx=deadzone(p.rx),depth=trigger(p.lt)-trigger(p.rt);
+    if(held(XINPUT_GAMEPAD_DPAD_UP))ly+=1;if(held(XINPUT_GAMEPAD_DPAD_DOWN))ly-=1;
+    Vec3 hr{},hu{},hf{},hp{};
+    if((lx!=0||ly!=0||depth!=0)&&handAxes(hr,hu,hf,hp)){
+        Basis b=basis_from_angles(yaw,pitch,roll);float sp=dt*0.6f;
+        Vec3 mv=add(add(mul(b.right,lx*sp),mul(b.up,ly*sp)),mul(b.forward,depth*sp));
+        auto proj=[&](Vec3 a){float l=length(a);return l>1e-4f?dot(mv,a)/(l*l):0.f;};
+        nudge(IT_FLASH_FORWARD,proj(hr));nudge(IT_FLASH_SIDE,proj(hu));nudge(IT_FLASH_UP,proj(hf));}
+    if(edge(XINPUT_GAMEPAD_X)){for(ItemId id:{IT_FLASH_FORWARD,IT_FLASH_UP,IT_FLASH_SIDE,IT_FLASH_ROLL})menu.value[id]=0;sound("select");}   // Square / Delete: back to the muzzle
+    if(held(XINPUT_GAMEPAD_RIGHT_SHOULDER))nudge(IT_FLASH_SIZE,dt*0.5f);if(held(XINPUT_GAMEPAD_LEFT_SHOULDER))nudge(IT_FLASH_SIZE,-dt*0.5f);
+    float r=menu.value[IT_FLASH_ROLL]+rx*dt*120.f;if(held(XINPUT_GAMEPAD_DPAD_RIGHT))r+=dt*90.f;if(held(XINPUT_GAMEPAD_DPAD_LEFT))r-=dt*90.f;
+    menu.value[IT_FLASH_ROLL]=std::fmod(std::fmod(r,360.f)+360.f,360.f);
+    if(edge(XINPUT_GAMEPAD_A))closeFlashEdit(true);else if(edge(XINPUT_GAMEPAD_B))closeFlashEdit(false);
+}
+// ---------- light colour picker (X / Enter on LUCES > Color) ----------
+// A saturation/brightness square, a hue bar, the preset swatches and the hex code, like a paint program. Everything applies live
+// to the chosen light; X / Enter keeps it, Circle / Esc puts the colour back. Pad: left stick / D-pad move in the square,
+// L1 / R1 or the right stick turn the hue, Square takes the next preset. Keyboard: WASD / arrows, Q / E, 1-9.
+struct ColorPicker{bool open=false;float h=30,s=.6f,v=1;int preset=-1;float before[4]{};unsigned openedFrame=0;};ColorPicker picker;
+bool pickerJustOpened(){return (picker.open&&picker.openedFrame==frameNo)||flashEditJustOpened();}   // the X / Enter that opened it must not also confirm it
+bool flashEditOpen();bool flashEditJustOpened();void flashEditFrame(const PadState& p,unsigned prev,float dt);
+bool pickerOpen(){return (picker.open&&menu.open&&menu.tab==TAB_LIGHTS)||flashEditOpen();}
+void pickerApply(){   // menu values and the light itself, so syncLightMenu sees no difference
+    int slot=std::clamp(menu.choice(IT_LIGHT_SLOT),0,PHOTO_LIGHTS-1);PhotoLight& l=photoLights[slot];
+    float hue=std::fmod(std::fmod(picker.h,360.f)+360.f,360.f);
+    l.hue=menu.value[IT_LIGHT_HUE]=hue;l.sat=menu.value[IT_LIGHT_SAT]=picker.s*100.f;l.val=menu.value[IT_LIGHT_VAL]=picker.v*100.f;
+    int c=picker.preset>=0?picker.preset:LIGHT_COLOR_CUSTOM;l.color=c;menu.value[IT_LIGHT_COLOR]=static_cast<float>(c);
+}
+void openPicker(){
+    int slot=std::clamp(menu.choice(IT_LIGHT_SLOT),0,PHOTO_LIGHTS-1);const PhotoLight& l=photoLights[slot];
+    picker.before[0]=menu.value[IT_LIGHT_COLOR];picker.before[1]=l.hue;picker.before[2]=l.sat;picker.before[3]=l.val;
+    Hsv c=toHsv(lightRgb(l));picker.h=c.h;picker.s=c.s;picker.v=c.v;picker.preset=l.color==LIGHT_COLOR_CUSTOM?-1:l.color;picker.open=true;picker.openedFrame=frameNo;sound("select");
+}
+void closePicker(bool keep){
+    if(!picker.open)return;picker.open=false;
+    if(!keep){int slot=std::clamp(menu.choice(IT_LIGHT_SLOT),0,PHOTO_LIGHTS-1);PhotoLight& l=photoLights[slot];
+        l.hue=menu.value[IT_LIGHT_HUE]=picker.before[1];l.sat=menu.value[IT_LIGHT_SAT]=picker.before[2];l.val=menu.value[IT_LIGHT_VAL]=picker.before[3];
+        menu.value[IT_LIGHT_COLOR]=picker.before[0];l.color=std::clamp(menu.choice(IT_LIGHT_COLOR),0,LIGHT_COLOR_COUNT-1);}
+    sound(keep?"select":"menu_close");
+}
+void pickPreset(int i){
+    if(i<0||i>=LIGHT_COLOR_CUSTOM)return;const LightColor& c=lightColors[i];Hsv h=toHsv({c.r,c.g,c.b});
+    picker.h=h.h;picker.s=h.s;picker.v=h.v;picker.preset=i;pickerApply();sound("move");
+}
+// Called every frame while the picker is open, with the pad (keyboard already merged in) and the frame time.
+unsigned long long pickerStepAt=0;
+void pickerFrame(const PadState& p,unsigned prev,float dt){
+    if(flashEditOpen()){flashEditFrame(p,prev,dt);return;}
+    auto edge=[&](unsigned m){return (p.buttons&m)&&!(prev&m);};
+    float lx=deadzone(p.lx),ly=deadzone(p.ly),rx=deadzone(p.rx);bool moved=false;
+    if(lx!=0||ly!=0){picker.s=std::clamp(picker.s+lx*dt*0.8f,0.f,1.f);picker.v=std::clamp(picker.v+ly*dt*0.8f,0.f,1.f);moved=true;}
+    if(rx!=0){picker.h+=rx*dt*120.f;moved=true;}
+    unsigned long long now=GetTickCount64();bool step=now>=pickerStepAt;
+    auto held=[&](unsigned m){return (p.buttons&m)!=0;};
+    if(step){float st=0.02f;bool any=false;
+        if(held(XINPUT_GAMEPAD_DPAD_LEFT)){picker.s=std::max(0.f,picker.s-st);any=true;}
+        if(held(XINPUT_GAMEPAD_DPAD_RIGHT)){picker.s=std::min(1.f,picker.s+st);any=true;}
+        if(held(XINPUT_GAMEPAD_DPAD_UP)){picker.v=std::min(1.f,picker.v+st);any=true;}
+        if(held(XINPUT_GAMEPAD_DPAD_DOWN)){picker.v=std::max(0.f,picker.v-st);any=true;}
+        if(held(XINPUT_GAMEPAD_LEFT_SHOULDER)){picker.h-=3;any=true;}
+        if(held(XINPUT_GAMEPAD_RIGHT_SHOULDER)){picker.h+=3;any=true;}
+        if(any){moved=true;pickerStepAt=now+25;}}
+    if(moved){picker.preset=-1;pickerApply();}
+    if(edge(XINPUT_GAMEPAD_X))pickPreset(picker.preset<0?0:(picker.preset+1)%LIGHT_COLOR_CUSTOM);
+    if(gameFocused())for(int i=0;i<9&&i<LIGHT_COLOR_CUSTOM;++i){static bool was[9]{};bool d=(GetAsyncKeyState('1'+i)&0x8000)!=0;if(d&&!was[i])pickPreset(i);was[i]=d;}
+    if(edge(XINPUT_GAMEPAD_A))closePicker(true);
+    else if(edge(XINPUT_GAMEPAD_B))closePicker(false);
+}
 // ---------- menu input ----------
 struct Repeat{unsigned long long since=0,next=0;};Repeat repeatUp,repeatDown,repeatLeft,repeatRight;
 bool pressedRepeat(bool down,Repeat& r,unsigned long long now){
@@ -836,9 +1115,11 @@ void openPhotoFolder(){ShellExecuteW(nullptr,L"explore",photoFolder().c_str(),nu
 // R1 + down (default), L1 + down, Options, or a double tap on down. L1/R1 switch tabs on release unless they were part of
 // a combo; Triangle hides/shows the whole interface; a tap on R3 resets the camera (or opens the folder in FOTOS).
 unsigned long long shoulderDownAt[2]{},lastDownTap=0,r3DownAt=0;bool shoulderUsed[2]{};
+void closePicker(bool keep);
 void toggleMenu(){
+    if(menu.open)closePicker(true);
     menu.open=!menu.open;viewing=false;confirmDelete=false;uiHidden=false;sound(menu.open?"menu_open":"menu_close");
-    if(menu.open){refreshPhotos();scanLogos();}else saveMenu();
+    if(menu.open){refreshPhotos();scanLogos();scanFrames();}else saveMenu();
 }
 void menuInput(unsigned b,unsigned prev,unsigned long long now){
     auto edge=[&](unsigned mask){return (b&mask)&&!(prev&mask);};
@@ -859,6 +1140,7 @@ void menuInput(unsigned b,unsigned prev,unsigned long long now){
         if(menu.open&&menu.tab==TAB_PHOTOS){openPhotoFolder();sound("select");}else{resetPose();noticeFor("Cámara reiniciada");log("camera reset");}
     }
     if(!menu.open)return;
+    if(pickerOpen()){circleDownAt=0;return;}   // pickerFrame has the pad
     if(edge(XINPUT_GAMEPAD_B))circleDownAt=now;
     if(released(XINPUT_GAMEPAD_B)&&circleDownAt&&now-circleDownAt<holdMs){
         if(viewing)viewing=false;else{menu.open=false;saveMenu();sound("menu_close");}
@@ -892,10 +1174,12 @@ void menuInput(unsigned b,unsigned prev,unsigned long long now){
     if(id!=IT_COUNT&&(left||right)){bool changed=menu.adjust(id,left?-1:1);sound(changed?"move":"nochange");
         if(diagLevel)logf("menu %s / %s = %s",tabNames[menu.tab],menu.item(id).label,menu.text(id).c_str());}
     if(id!=IT_COUNT&&menu.item(id).kind==KIND_ACTION&&edge(XINPUT_GAMEPAD_A))actionItem(id);
+    if(id==IT_LIGHT_COLOR&&edge(XINPUT_GAMEPAD_A))openPicker();
+    if(id==IT_MUZZLE_FLASH&&edge(XINPUT_GAMEPAD_A))openFlashEdit();
 }
-bool menuWantsCross(){return menu.open&&(menu.tab==TAB_PHOTOS||(menu.current()!=IT_COUNT&&menu.item(menu.current()).kind==KIND_ACTION));}
+bool menuWantsCross(){return menu.open&&(menu.tab==TAB_PHOTOS||pickerOpen()||menu.current()==IT_LIGHT_COLOR||menu.current()==IT_MUZZLE_FLASH||(menu.current()!=IT_COUNT&&menu.item(menu.current()).kind==KIND_ACTION));}
 bool menuOwnsTriangle(){return true;}   // Triangle always toggles the interface now; reset is a tap on R3
-bool menuOwnsSquare(){return menu.open&&menu.tab==TAB_PHOTOS;}
+bool menuOwnsSquare(){return menu.open&&(menu.tab==TAB_PHOTOS||pickerOpen());}
 // Applies the menu to the live session every frame (cheap; only changed values touch the game).
 // ---------- keyboard and mouse ----------
 // Space / left click: photo   WASD: move   mouse: look   Q / E: down / up   Z / C: tilt   Shift: faster   - / +: zoom
@@ -926,8 +1210,11 @@ bool keyboardInput(PadState& pad,unsigned long long now,float dt){
     if(keyEdge(VK_TAB,tab))toggleMenu();
     // Esc acts on release, so the game never sees it held after photo mode closes.
     if(keyRelease(VK_ESCAPE,esc)){
-        if(viewing)viewing=false;else if(menu.open){menu.open=false;saveMenu();sound("menu_close");}
-        else{restore();return true;}
+        if(flashEditOpen())closeFlashEdit(false);else if(pickerOpen())closePicker(false);else if(viewing)viewing=false;else if(menu.open){menu.open=false;saveMenu();sound("menu_close");}
+        else{   // Cyberpunk-style safety: the first Esc only asks, so a set-up shot is not lost by accident
+            static unsigned long long escAt=0;unsigned long long t=GetTickCount64();
+            if(escAt&&t-escAt<2500){escAt=0;restore();return true;}
+            escAt=t;noticeFor("Pulsa Esc otra vez para salir");sound("nochange");}
     }
     // Mouse look: read the cursor offset from the window centre, then put it back.
     float sens=menu.value[IT_MOUSE_LOOK];
@@ -960,6 +1247,7 @@ void phase2Frame(){
     applyHidePeople(menu.on(IT_HIDE_PEOPLE));
     applyTimeAndWeather();applyHidePlayer();applySlowmo();if(!slowmoActive){applyCjPose();applyCjExpression();applyHandWeapon();poseNoticeShown=-1;}
     else if(menu.choice(IT_POSE)!=appliedPoseIndex&&menu.choice(IT_POSE)!=poseNoticeShown){poseNoticeShown=menu.choice(IT_POSE);noticeFor("Las poses necesitan Tiempo: Congelado");}   // slow motion keeps animating CJ
+    applyMuzzleFlash();applyCjTurn();splitToneFollowsHue();
     lookAtCamera=menu.on(IT_LOOK_AT);cameraOrbit=menu.choice(IT_CAMERA_MODE)==1;freezeAnimations(!slowmoActive&&animFreezeAllowed);bypassAnimCallHooks(!slowmoActive&&animFreezeAllowed);passiveFlyingProbe();
     if(!slowmoActive&&pedPoseTiming==0)refreshPedPoses();   // old timing, kept only for A/B diagnostics
     if(menu.on(IT_MUSIC))musicStart();else musicStop();
@@ -987,13 +1275,16 @@ float4 shadows : register(c11);   // shadows on (1), blur radius in pixels, mask
 float4 camRight : register(c12);  // the photo camera's axes in world space; camRight.w = Proper's normals buffer is bound (1)
 float4 camUp : register(c13);
 float4 camForward : register(c14);
+float4 spotSoft : register(c15);  // per light: how soft the spotlight's edge is (0..1 of the cone)
 sampler2D normalsTex : register(s3);
+float rawDepth(float2 uv) { return tex2Dlod(depthTex, float4(uv, 0, 0)).r; }
 float hardwareZ(float2 uv) {
     float d = tex2Dlod(depthTex, float4(uv, 0, 0)).r;
     return planes.z > 0.5 ? 1 - d : d;
 }
 // RenderWare's projection: d = f/(f-n) * (1 - n/z)
-float viewZ(float2 uv) { return planes.x * planes.y / (planes.y - hardwareZ(uv) * (planes.y - planes.x)); }
+// planes.z = 2: the depth is already linear (SimpleDepthBuffer's R32F view-space Z).
+float viewZ(float2 uv) { return planes.z > 1.5 ? rawDepth(uv) : planes.x * planes.y / (planes.y - hardwareZ(uv) * (planes.y - planes.x)); }
 float3 viewPos(float2 uv) {
     float z = viewZ(uv);
     return float3((uv.x * 2 - 1) * view.z * z, (1 - uv.y * 2) * view.w * z, z);
@@ -1018,7 +1309,7 @@ float3 smoothNormal(float2 uv, float3 p, float3 geo) {
     float3 v = float3(dot(w, camRight.xyz), dot(w, camUp.xyz), dot(w, camForward.xyz));
     return camRight.w > 0.5 && dot(v, -normalize(p)) > -0.3 ? v : geo;
 }
-bool isSky(float2 uv) { return hardwareZ(uv) > 0.999999 || viewZ(uv) > planes.y * 0.98; }   // nothing was drawn there
+bool isSky(float2 uv) { return planes.z > 1.5 ? viewZ(uv) > planes.y * 0.98 : (hardwareZ(uv) > 0.999999 || viewZ(uv) > planes.y * 0.98); }   // nothing was drawn there
 )";
 // Screen-space shadows: from each pixel a ray is marched toward every light (32 steps, packed next to the surface for contact
 // shadows, jittered per pixel). A step that lands behind what the depth buffer shows there, but less than an object's thickness
@@ -1082,7 +1373,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0 {
             float3 v = a.xyz - p; float dist = length(v); float3 l = v / max(dist, 0.001);
             float r = dist / a.w, win = saturate(1 - r * r * r * r);
             float fall = win * win / (1 + 4 * r * r);                 // full next to the light, smoothly nothing at its range
-            float cone = b.w > 0.5 ? smoothstep(e.w, lerp(e.w, 1, 0.45), dot(-l, e.xyz)) : 1;
+            float cone = b.w > 0.5 ? smoothstep(e.w, lerp(e.w, 1, spotSoft[i]), dot(-l, e.xyz)) : 1;
             float facing = saturate((dot(n, l) + 0.2) / 1.2);        // a little wrap so rebuilt normals never look harsh
             light += b.rgb * fall * cone * facing * vis[i];
         }
@@ -1100,7 +1391,19 @@ float4 mode  : register(c3);   // filter, lens drops
 float4 area  : register(c4);   // picture area inside the frame bars (uv x0, y0, x1, y1)
 float4 extra : register(c5);   // chromatic aberration, bloom
 float4 lens  : register(c6);   // barrel distortion, radial blur, haze, fisheye
-float4 fish  : register(c7);   // tangent of the rendered half FOV: horizontal, vertical; round border
+float4 tone  : register(c8);   // highlights, shadows (-1..1)
+float4 tintS : register(c9);   // split toning: shadow tint (rgb, already times its amount)
+float4 tintH : register(c10);  // split toning: highlight tint
+float4 fish  : register(c7);
+float4 dof   : register(c11);  // on, focus distance (m), lens constant / f-number, largest blur radius in pixels
+float4 dofZ  : register(c12);  // depth source: 0 linear (SimpleDepthBuffer), 1 INTZ (Proper); near, far, reversed
+sampler2D depthS : register(s1);   // scene depth: SimpleDepthBuffer linear, or Proper INTZ
+float sceneZ(float2 t) {
+    float d = tex2Dlod(depthS, float4(t, 0, 0)).r;
+    if (dofZ.x < 0.5) return d;
+    d = dofZ.w > 0.5 ? 1 - d : d;
+    return dofZ.y * dofZ.z / (dofZ.z - d * (dofZ.z - dofZ.y));
+}
 float3 tap(float2 uv) { return tex2D(scene, uv).rgb; }
 float3 sepia(float3 c) { return float3(dot(c, float3(.393, .769, .189)), dot(c, float3(.349, .686, .168)), dot(c, float3(.272, .534, .131))); }
 float hash(float2 p) { return frac(sin(dot(p, float2(127.1, 311.7))) * 43758.5453); }
@@ -1137,10 +1440,30 @@ float3 camTap(float2 uv) {
     float y = dot(c, float3(0.299, 0.587, 0.114));
     return y + (b - dot(b, float3(0.299, 0.587, 0.114)));
 }
+// VHS tape (Cattuba): softer than the camcorder, lines that wobble, colour smeared to the right, a tracking band and
+// head-switching noise along the bottom.
+float3 vhsTap(float2 uv) {
+    float px = geo.x / (geo.y * 1080.0);   // one 1080p pixel in uv.x
+    float row = floor(uv.y / geo.y * 0.5);
+    uv.x += (hash(float2(row * 0.37, 7.0)) - 0.5) * px * 2.5;
+    float bottom = smoothstep(0.955, 0.975, uv.y);
+    uv.x += bottom * (hash(float2(row, 11.0)) * 18 + 10) * px;
+    float band = exp(-pow((uv.y - 0.78) / 0.012, 2));
+    uv.x += band * (hash(float2(row, 3.0)) - 0.5) * px * 30;
+    float3 y3 = 0;
+    [unroll] for (int i = -2; i <= 2; ++i) y3 += tap(uv + float2(px * 1.2 * i, 0));
+    float luma = dot(y3 / 5, float3(0.299, 0.587, 0.114));
+    float3 ch = 0;
+    [unroll] for (int j = 0; j < 8; ++j) ch += tap(uv + float2(px * (4.0 - 2.0 * j), 0));   // wide and pulled from the left
+    ch /= 8;
+    float3 c = luma + (ch - dot(ch, float3(0.299, 0.587, 0.114))) * 0.85;
+    c += band * hash(uv * 900 + look.z) * 0.35;
+    return lerp(c, hash(uv * 517 + look.z).xxx, bottom * 0.5);
+}
 float4 main(float2 uv0 : TEXCOORD0) : COLOR0 {
     float2 uv = uv0;
     // Polaroid: the picture sits inside a cream card (thin sides and top, deep bottom), scaled to fit its width.
-    bool polaroid = mode.x > 5.5 && mode.x < 6.5, camcorder = mode.x > 6.5;
+    bool polaroid = mode.x > 5.5 && mode.x < 6.5, camcorder = mode.x > 6.5 && mode.x < 7.5, vhs = mode.x > 7.5;
     if (polaroid) {   // the card fills the picture area (inside any frame bars); l = position on the card
         float2 size = area.zw - area.xy, l = (uv0 - area.xy) / size;
         float bx = 0.045 / (geo.w * size.x / size.y), top = 0.045, bottom = 0.17;
@@ -1169,7 +1492,8 @@ float4 main(float2 uv0 : TEXCOORD0) : COLOR0 {
     float2 offs = 0; float shade = 0;
     if (mode.y > 0) drops(uv, mode.y, geo.w, offs, shade);
     float2 suv = uv + offs;
-    float3 c = camcorder ? camTap(suv) : tap(suv);
+    float3 c = camcorder ? camTap(suv) : vhs ? vhsTap(suv) : tap(suv);
+
     if (extra.x > 0) {   // chromatic aberration: red and blue pulled apart toward the edges
         float2 ca = (uv - 0.5) * extra.x * 0.04;
         c.r = tap(suv + ca).r; c.b = tap(suv - ca).b;
@@ -1198,12 +1522,39 @@ float4 main(float2 uv0 : TEXCOORD0) : COLOR0 {
     s += tap(suv + float2(h.x, 0)) + tap(suv - float2(h.x, 0)) + tap(suv + float2(0, h.y)) + tap(suv - float2(0, h.y));
     s += tap(suv + h * 0.7) + tap(suv - h * 0.7) + tap(suv + float2(h.x, -h.y) * 0.7) + tap(suv + float2(-h.x, h.y) * 0.7);
     c = lerp(c, s / 17, saturate(band * look.w * 6));
+    float3 dofDelta = 0;
+    if (dof.x > 0.5) {   // depth of field: blur grows with |z - focus| / (z * focus) / f-number, like a real lens
+        float z = sceneZ(suv);
+        float coc = z > 0.05 ? saturate(abs(z - dof.y) / max(z * dof.y, 0.01) * dof.z) : 0;   // no depth there: leave it sharp
+        if (dof.x > 1.5) return float4(coc.xxx, 1);   // "Ver enfoque": black = sharp, white = most blur
+        if (coc > 0.03) {
+            float3 sum = c; float wsum = 1;
+            [loop] for (int i = 0; i < 28; ++i) {
+                float r = sqrt((i + 0.5) / 28.0), a = i * 2.39996;   // golden-angle disc
+                float2 t = suv + float2(cos(a), sin(a)) * r * coc * dof.w * geo.xy;
+                float zt = sceneZ(t);
+                float ct = saturate(abs(zt - dof.y) / max(zt * dof.y, 0.01) * dof.z);
+                float wgt = zt < z - 0.3 ? ct : 1;   // a sharp subject in front never bleeds into the blurred background
+                sum += tex2Dlod(scene, float4(t, 0, 0)).rgb * wgt; wsum += wgt;   // no gradients inside a dynamic loop
+            }
+            dofDelta = sum / wsum - tex2Dlod(scene, float4(suv, 0, 0)).rgb;   // applied after the other lens effects
+        }
+    }
+    c += dofDelta;   // radial blur, bloom or edge blur resample the sharp scene and must not wash the depth of field out
     c *= 1 - shade;
     c *= exp2(grade.x);
     c = (c - 0.5) * grade.y + 0.5;
     float l = dot(c, float3(0.299, 0.587, 0.114));
     c = lerp(l.xxx, c, grade.z);
     c += float3(grade.w, grade.w * 0.25, -grade.w) * 0.08;
+    {   // highlights / shadows, then split toning (one tint in the shadows, another in the highlights, brightness kept)
+        float lum = dot(saturate(c), float3(0.299, 0.587, 0.114));
+        float hw = smoothstep(0.25, 0.9, lum), sw = 1 - smoothstep(0.0, 0.6, lum);
+        c += tone.y * 0.3 * sw;
+        c *= 1 + tone.x * 0.8 * hw;
+        float hs = smoothstep(0.4, 0.9, lum), ss = 1 - smoothstep(0.1, 0.6, lum);
+        c += (tintS.rgb - dot(tintS.rgb, float3(0.299, 0.587, 0.114))) * ss + (tintH.rgb - dot(tintH.rgb, float3(0.299, 0.587, 0.114))) * hs;
+    }
     float m = mode.x;
     float3 f = c;
     if (m > 0.5) f = l.xxx;
@@ -1223,6 +1574,13 @@ float4 main(float2 uv0 : TEXCOORD0) : COLOR0 {
         v = lerp(vl.xxx, v, 1.18) * float3(1.02, 1.0, 1.04) + 0.035;
         v *= 0.95 + 0.05 * sin(uv0.y / geo.y * 1.5708);   // faint scanlines
         f = v + (hash(uv0 / geo.xy + look.z) - 0.5) * 0.05;
+    }
+    if (vhs) {  // tape: lifted blacks, soft highlights, less colour, a cool magenta cast, faint lines and grain
+        float3 v = c * 0.9 + 0.055;
+        float vl = dot(v, float3(0.299, 0.587, 0.114));
+        v = lerp(vl.xxx, v, 0.8) * float3(1.02, 0.97, 1.06);
+        v *= 0.97 + 0.03 * sin(uv0.y / geo.y * 3.14159);
+        f = v + (hash(uv0 / geo.xy * 0.5 + look.z) - 0.5) * 0.07;
     }
     c = f;
     if (lens.z > 0) {   // haze: a pale veil, a little thicker toward the top of the frame
@@ -1288,7 +1646,7 @@ void drawPhotoLightsPass(IDirect3DDevice9* dev,IDirect3DSurface9* back,const D3D
     float w=static_cast<float>(d.Width),h=static_cast<float>(d.Height);
     Basis b=basis_from_angles(yaw,pitch,roll);float tanV=std::tan(renderFov()*PI/360.f)*0.75f,aspect=w/h;   // as in drawLightMarkers
     auto toView=[&](Vec3 v){return Vec3{dot(v,b.right),dot(v,b.up),dot(v,b.forward)};};
-    float c[4*(6+3*PHOTO_LIGHTS)]{};int n=0;   // c0 view, c1 planes, c2-c10 lights, c11 shadows, c12-c14 camera axes
+    float c[4*(6+3*PHOTO_LIGHTS)]{},soft[4]{0.45f,0.45f,0.45f,0};int n=0;   // c0 view, c1 planes, c2-c10 lights, c11 shadows, c12-c14 camera axes
     for(const PhotoLight& l:photoLights){
         if(!l.on||(!l.placed&&l.type!=2))continue;
         Rgb col=lightRgb(l);float k=l.intensity/100.f*2.2f;
@@ -1297,36 +1655,38 @@ void drawPhotoLightsPass(IDirect3DDevice9* dev,IDirect3DSurface9* back,const D3D
         float* r=c+8+12*n;
         r[0]=at.x;r[1]=at.y;r[2]=at.z;r[3]=std::max(l.range,0.5f);
         r[4]=col.r*k;r[5]=col.g*k;r[6]=col.b*k;r[7]=static_cast<float>(l.type);
-        r[8]=dir.x;r[9]=dir.y;r[10]=dir.z;r[11]=std::cos((l.type==2?50.f:36.f)*PI/180.f);   // cone half-angle
+        r[8]=dir.x;r[9]=dir.y;r[10]=dir.z;r[11]=std::cos((l.type==2?50.f:l.cone)*PI/180.f);   // cone half-angle (LUCES > Apertura del reflector)
+        soft[n]=std::clamp(l.soft/100.f,0.02f,1.f);
         ++n;}
     if(!n)return;
     if(!fxTried)compileFx(dev);
     if(!lightShader||!fxVertex){shaderLightsBroken=true;log("lights: no light shader; lights go through CPointLights");return;}
-    IDirect3DTexture9* depth=psDepthBuffer();
-    if(!depth){shaderLightsBroken=true;log("lights: Proper Shaders gave no depth buffer; lights go through CPointLights");return;}
+    bool proper=properDepthReady();IDirect3DTexture9* depth=proper?psDepthBuffer():sdbDepth();
+    if(!depth){if(proper){shaderLightsBroken=true;log("lights: Proper Shaders gave no depth buffer; lights go through CPointLights");}return;}   // SimpleDepthBuffer: just this frame
     D3DSURFACE_DESC dd{};if(FAILED(depth->GetLevelDesc(0,&dd))||!dd.Width||!dd.Height)return;
     BYTE* cam=mem<BYTE*>(RW_CAMERA);float nearZ=lightNear,farZ=lightFar;
     if(!(nearZ>0&&farZ>nearZ)&&cam){nearZ=*reinterpret_cast<float*>(cam+0x80);farZ=*reinterpret_cast<float*>(cam+0x84);}
+    if(!proper)sdb.GetClipPlanes(&nearZ,&farZ);
     if(!(nearZ>0&&farZ>nearZ))return;
-    bool reversed=properReversedDepth();
+    bool reversed=proper&&properReversedDepth();
     if(!lightPassLogged){lightPassLogged=true;
         logf("lights pass: depth %ux%u fmt %08lX, near %.3f far %.1f, reversed %d, tanH %.4f tanV %.4f (RW view window %.4f %.4f), %d light(s), normals buffer %s",dd.Width,dd.Height,
             static_cast<unsigned long>(dd.Format),nearZ,farZ,reversed?1:0,tanV*aspect,tanV,cam?*reinterpret_cast<float*>(cam+0x68):0.f,cam?*reinterpret_cast<float*>(cam+0x6C):0.f,n,psNormalsBuffer&&psNormalsBuffer()?"yes":"no");}
     if(!copySceneTex(dev,back,d))return;
     c[0]=1.f/static_cast<float>(dd.Width);c[1]=1.f/static_cast<float>(dd.Height);c[2]=tanV*aspect;c[3]=tanV;
-    c[4]=nearZ;c[5]=farZ;c[6]=reversed?1.f:0.f;c[7]=static_cast<float>(n);
+    c[4]=nearZ;c[5]=farZ;c[6]=proper?(reversed?1.f:0.f):2.f;c[7]=static_cast<float>(n);   // 2 = linear depth (SimpleDepthBuffer)
     // LUCES > Sombras: the shadow pass fills shadowTex first (screen-space rays, see shadowMain), the light pass blurs and uses it.
     bool shadowsOn=menu.on(IT_LIGHT_SHADOWS)&&shadowShader;
     if(shadowsOn&&!shadowTex&&FAILED(dev->CreateTexture(d.Width,d.Height,1,D3DUSAGE_RENDERTARGET,D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,&shadowTex,nullptr))){shadowTex=nullptr;}
     IDirect3DSurface9* shadowSurface=nullptr;if(shadowsOn&&(!shadowTex||FAILED(shadowTex->GetSurfaceLevel(0,&shadowSurface))))shadowSurface=nullptr;
     shadowsOn=shadowSurface!=nullptr;
     c[44]=shadowsOn?1.f:0.f;c[45]=std::max(2.f,3.5f*h/1080.f);c[46]=1/w;c[47]=1/h;   // blur radius ~3.5 px at 1080p
-    IDirect3DTexture9* normals=psNormalsBuffer?psNormalsBuffer():nullptr;   // smooth normals; without them the depth normals are used
+    IDirect3DTexture9* normals=proper&&psNormalsBuffer?psNormalsBuffer():nullptr;   // smooth normals; without them the depth normals are used
     Vec3 axes[3]={b.right,b.up,b.forward};for(int i=0;i<3;++i){c[48+4*i]=axes[i].x;c[49+4*i]=axes[i].y;c[50+4*i]=axes[i].z;}
     c[51]=normals?1.f:0.f;
     float vc[4]={-1/w,1/h,0,0};
     IDirect3DSurface9* oldDepth=nullptr;if(FAILED(dev->GetDepthStencilSurface(&oldDepth)))oldDepth=nullptr;dev->SetDepthStencilSurface(nullptr);
-    dev->SetPixelShaderConstantF(0,c,6+3*PHOTO_LIGHTS);dev->SetVertexShaderConstantF(0,vc,1);dev->SetVertexShader(fxVertex);
+    dev->SetPixelShaderConstantF(0,c,6+3*PHOTO_LIGHTS);dev->SetPixelShaderConstantF(15,soft,1);dev->SetVertexShaderConstantF(0,vc,1);dev->SetVertexShader(fxVertex);
     dev->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE);dev->SetRenderState(D3DRS_SRGBWRITEENABLE,FALSE);
     for(DWORD s=0;s<4;++s){
         dev->SetSamplerState(s,D3DSAMP_SRGBTEXTURE,FALSE);dev->SetSamplerState(s,D3DSAMP_MINFILTER,D3DTEXF_POINT);dev->SetSamplerState(s,D3DSAMP_MAGFILTER,D3DTEXF_POINT);
@@ -1342,6 +1702,7 @@ bool fxNeeded(){
     for(const MenuItem& i:menu.items)if(i.tab==TAB_FX&&i.kind!=KIND_ACTION&&i.id!=IT_TILT_FOCUS&&i.id!=IT_SKYGFX&&menu.value[i.id]!=i.def)return true;
     return false;
 }
+bool dofNoticeShown=false;IDirect3DSurface9* fxOldDepth=nullptr;
 void drawFx(IDirect3DDevice9* dev,IDirect3DSurface9* back,const D3DSURFACE_DESC& d){
     if(!fxTried)compileFx(dev);if(!fxShader)return;
     if(!copySceneTex(dev,back,d))return;
@@ -1354,28 +1715,130 @@ void drawFx(IDirect3DDevice9* dev,IDirect3DSurface9* back,const D3DSURFACE_DESC&
         lens[4]={menu.value[IT_DISTORTION]/50.f,menu.value[IT_RADIAL_BLUR]/100.f,menu.value[IT_HAZE]/100.f,menu.value[IT_FISHEYE]/100.f};
     float tanV=std::tan(renderFov()*PI/360.f)*0.75f,fish[4]={tanV*w/h,tanV,menu.on(IT_FISHEYE_CIRCLE)?1.f:0.f,0};   // as in drawLightMarkers
     float vc[4]={-1/w,1/h,0,0};
-    dev->SetPixelShaderConstantF(0,c,4);dev->SetPixelShaderConstantF(4,area,1);dev->SetPixelShaderConstantF(5,extra,1);dev->SetPixelShaderConstantF(6,lens,1);dev->SetPixelShaderConstantF(7,fish,1);dev->SetVertexShaderConstantF(0,vc,1);dev->SetPixelShader(fxShader);dev->SetVertexShader(fxVertex);
+    dev->SetPixelShaderConstantF(0,c,4);dev->SetPixelShaderConstantF(4,area,1);dev->SetPixelShaderConstantF(5,extra,1);dev->SetPixelShaderConstantF(6,lens,1);dev->SetPixelShaderConstantF(7,fish,1);
+    // Depth of field (EFECTOS > Profundidad de campo): needs SimpleDepthBuffer's depth this frame.
+    bool dofProper=menu.choice(IT_DOF)&&properDepthReady()&&psDepthBuffer();
+    {static unsigned long long loggedFor=0;if(menu.choice(IT_DOF)&&loggedFor!=sessionOpenedAt){loggedFor=sessionOpenedAt;
+        IDirect3DTexture9* t=dofProper?psDepthBuffer():sdbDepth();D3DSURFACE_DESC td{};if(t)t->GetLevelDesc(0,&td);
+        logf("depth of field: source %s, texture %p %ux%u fmt %08lX, reversed %d, near %.3f far %.1f",dofProper?"Proper":"SimpleDepthBuffer",static_cast<void*>(t),td.Width,td.Height,
+            static_cast<unsigned long>(td.Format),dofProper&&properReversedDepth()?1:0,lightNear,lightFar);}}
+    IDirect3DTexture9* depthTex=!menu.choice(IT_DOF)?nullptr:dofProper?psDepthBuffer():sdbDepth();
+    {float zn=0.3f,zf=1600.f;BYTE* cam=mem<BYTE*>(RW_CAMERA);
+        if(dofProper){zn=lightNear;zf=lightFar;if(!(zn>0&&zf>zn)&&cam){zn=*reinterpret_cast<float*>(cam+0x80);zf=*reinterpret_cast<float*>(cam+0x84);}}
+        float dz[4]={dofProper?1.f:0.f,zn,zf,dofProper&&properReversedDepth()?1.f:0.f};dev->SetPixelShaderConstantF(12,dz,1);}
+    if(dofProper){if(FAILED(dev->GetDepthStencilSurface(&fxOldDepth)))fxOldDepth=nullptr;dev->SetDepthStencilSurface(nullptr);}   // Proper's INTZ can't be sampled while it is the bound depth buffer
+    {float focus=menu.value[IT_DOF_FOCUS];
+        if(menu.choice(IT_DOF)==2){Vec3 head=add(playerPosition(),Vec3{0,0,0.6f});Basis cb=basis_from_angles(yaw,pitch,roll);float fz=dot(sub(head,pose.pos),cb.forward);if(fz>0.3f)focus=fz;}
+        float stop=apertureStops[std::clamp(menu.choice(IT_DOF_APERTURE),0,7)];
+        float dp[4]={depthTex?(menu.choice(IT_DOF)==3?2.f:1.f):0.f,std::max(focus,0.3f),40.f/(stop*stop),28.f*h/1080.f};dev->SetPixelShaderConstantF(11,dp,1);
+        if(!menu.choice(IT_DOF))dofNoticeShown=false;
+        else if(!depthTex&&!dofNoticeShown){dofNoticeShown=true;noticeFor("La profundidad de campo necesita SimpleDepthBuffer");}
+        dev->SetTexture(1,depthTex);if(depthTex){dev->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_POINT);dev->SetSamplerState(1,D3DSAMP_MAGFILTER,D3DTEXF_POINT);
+            dev->SetSamplerState(1,D3DSAMP_MIPFILTER,D3DTEXF_NONE);dev->SetSamplerState(1,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);dev->SetSamplerState(1,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);}}
+    {Rgb ts=hueColor(menu.value[IT_SPLIT_SHADOW_HUE],1),th=hueColor(menu.value[IT_SPLIT_HIGH_HUE],1);float as=menu.value[IT_SPLIT_SHADOW_AMOUNT]/100.f*0.3f,ah=menu.value[IT_SPLIT_HIGH_AMOUNT]/100.f*0.3f;
+        float tn[12]={menu.value[IT_HIGHLIGHTS]/100.f,menu.value[IT_SHADOWS]/100.f,0,0,ts.r*as,ts.g*as,ts.b*as,0,th.r*ah,th.g*ah,th.b*ah,0};dev->SetPixelShaderConstantF(8,tn,3);}dev->SetVertexShaderConstantF(0,vc,1);dev->SetPixelShader(fxShader);dev->SetVertexShader(fxVertex);
     dev->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE);
     dev->SetSamplerState(0,D3DSAMP_SRGBTEXTURE,FALSE);dev->SetRenderState(D3DRS_SRGBWRITEENABLE,FALSE);
     dev->SetTexture(0,sceneTex);dev->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);dev->SetSamplerState(0,D3DSAMP_MAGFILTER,D3DTEXF_LINEAR);
     dev->SetSamplerState(0,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);dev->SetSamplerState(0,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);
     drawClipQuad(dev);
-    dev->SetTexture(0,nullptr);dev->SetPixelShader(nullptr);dev->SetVertexShader(nullptr);dev->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE);dev->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);
+    if(fxOldDepth){dev->SetDepthStencilSurface(fxOldDepth);fxOldDepth->Release();fxOldDepth=nullptr;}dev->SetTexture(0,nullptr);dev->SetTexture(1,nullptr);dev->SetPixelShader(nullptr);dev->SetVertexShader(nullptr);dev->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE);dev->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);
+}
+// ---------- the photo on a loading-screen illustration (COMPONER > Foto sobre ilustración) ----------
+// The finished photo lies like a tilted polaroid on one of San Andreas' loading-screen illustrations (loadsc1-14). They are read from
+// the player's own game, so nothing of Rockstar's ships with the mod: the largest loadscs.txd under modloader (Absolute Artwork has
+// them at 3840x2160), else models\txd\LOADSCS.txd. The TXD is mapped, not read, and only the chosen texture is uploaded (DXT1).
+IDirect3DTexture9* artTex=nullptr;int artTexIndex=-1;std::wstring artFile;bool artSearched=false;UINT artW=0,artH=0;
+void findLargest(const std::wstring& dir,int depth,const wchar_t* name,std::wstring& best,ULONGLONG& bestSize){
+    WIN32_FIND_DATAW fd{};HANDLE h=FindFirstFileW((dir+L"\\*").c_str(),&fd);if(h==INVALID_HANDLE_VALUE)return;
+    do{std::wstring n=fd.cFileName;if(n==L"."||n==L"..")continue;
+        if(fd.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY){if(depth>0)findLargest(dir+L"\\"+n,depth-1,name,best,bestSize);continue;}
+        ULONGLONG size=(static_cast<ULONGLONG>(fd.nFileSizeHigh)<<32)|fd.nFileSizeLow;
+        if(_wcsicmp(n.c_str(),name)==0&&size>bestSize){bestSize=size;best=dir+L"\\"+n;}
+    }while(FindNextFileW(h,&fd));FindClose(h);
+}
+void findArtFile(){
+    artSearched=true;wchar_t exe[MAX_PATH]{};GetModuleFileNameW(nullptr,exe,MAX_PATH);wchar_t* slash=wcsrchr(exe,L'\\');if(slash)*slash=0;
+    std::wstring game=exe;ULONGLONG size=0;findLargest(game+L"\\modloader",4,L"loadscs.txd",artFile,size);
+    if(artFile.empty()){std::wstring v=game+L"\\models\\txd\\LOADSCS.txd";if(GetFileAttributesW(v.c_str())!=INVALID_FILE_ATTRIBUTES)artFile=v;}
+    char u[MAX_PATH*3]{};WideCharToMultiByte(CP_UTF8,0,artFile.c_str(),-1,u,sizeof(u),nullptr,nullptr);logf("loading-screen artwork: %s",artFile.empty()?"not found":u);
+}
+IDirect3DTexture9* txdTexture(IDirect3DDevice9* dev,const std::wstring& file,const char* want,UINT& tw,UINT& th){
+    HANDLE f=CreateFileW(file.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr);if(f==INVALID_HANDLE_VALUE)return nullptr;
+    LARGE_INTEGER li{};GetFileSizeEx(f,&li);size_t size=static_cast<size_t>(li.QuadPart);
+    HANDLE map=size>=12?CreateFileMappingW(f,nullptr,PAGE_READONLY,0,0,nullptr):nullptr;const BYTE* d=map?static_cast<const BYTE*>(MapViewOfFile(map,FILE_MAP_READ,0,0,0)):nullptr;
+    IDirect3DTexture9* tex=nullptr;
+    auto u32=[&](size_t o){uint32_t v=0;if(o+4<=size)std::memcpy(&v,d+o,4);return v;};
+    if(d&&u32(0)==0x16){
+        for(size_t o=12,end=std::min(size,static_cast<size_t>(12)+u32(4)),next=0;o+12<=end;o=next){
+            next=o+12+u32(o+4);if(next<=o)break;   // a broken size must not wrap the walk back
+            if(u32(o)!=0x15)continue;size_t st=o+24;if(st+88>size||u32(o+12)!=1||u32(st)!=9)continue;
+            char name[33]{};std::memcpy(name,d+st+8,32);if(_stricmp(name,want)!=0)continue;
+            D3DFORMAT fmt=static_cast<D3DFORMAT>(u32(st+76));UINT w=d[st+80]|(d[st+81]<<8),h=d[st+82]|(d[st+83]<<8);
+            bool dxt=fmt==D3DFMT_DXT1||fmt==D3DFMT_DXT3||fmt==D3DFMT_DXT5;if(!dxt&&fmt!=D3DFMT_A8R8G8B8&&fmt!=D3DFMT_X8R8G8B8)break;
+            size_t level=st+88;uint32_t bytes=u32(level);if(bytes>size||level+4+bytes>size||w<2||h<2)break;
+            UINT rows=dxt?(h+3)/4:h,rowBytes=dxt?((w+3)/4)*(fmt==D3DFMT_DXT1?8:16):w*4;if(static_cast<size_t>(rows)*rowBytes>bytes)break;
+            if(SUCCEEDED(dev->CreateTexture(w,h,1,0,fmt,D3DPOOL_MANAGED,&tex,nullptr))&&tex){
+                D3DLOCKED_RECT r{};if(SUCCEEDED(tex->LockRect(0,&r,nullptr,0))){for(UINT y=0;y<rows;++y)std::memcpy(static_cast<BYTE*>(r.pBits)+y*r.Pitch,d+level+4+static_cast<size_t>(y)*rowBytes,rowBytes);tex->UnlockRect(0);}
+                tw=w;th=h;}
+            break;
+        }
+    }
+    if(d)UnmapViewOfFile(d);if(map)CloseHandle(map);CloseHandle(f);return tex;
+}
+IDirect3DTexture9* currentArtwork(IDirect3DDevice9* dev){
+    int index=menu.choice(IT_ARTWORK);
+    if(index!=artTexIndex){
+        if(artTex){artTex->Release();artTex=nullptr;}artTexIndex=index;
+        if(index>0){if(!artSearched)findArtFile();
+            if(!artFile.empty()){char name[16];std::snprintf(name,sizeof(name),"loadsc%d",index);artTex=txdTexture(dev,artFile,name,artW,artH);
+                logf("artwork %s: %s (%ux%u)",name,artTex?"loaded":"failed",artW,artH);}}
+    }
+    return artTex;
+}
+// A quad with free corners (clockwise from top left) and texture coordinates u0..u1, v0..v1; no texture = a plain colour.
+void freeQuad(IDirect3DDevice9* dev,IDirect3DTexture9* tex,const float (&x)[4],const float (&y)[4],float u0,float v0,float u1,float v1,DWORD c){
+    TexVertex v[]={{x[0]-0.5f,y[0]-0.5f,0,1,c,u0,v0},{x[1]-0.5f,y[1]-0.5f,0,1,c,u1,v0},{x[3]-0.5f,y[3]-0.5f,0,1,c,u0,v1},{x[2]-0.5f,y[2]-0.5f,0,1,c,u1,v1}};
+    dev->SetTexture(0,tex);dev->SetTextureStageState(0,D3DTSS_COLOROP,tex?D3DTOP_MODULATE:D3DTOP_SELECTARG2);dev->SetTextureStageState(0,D3DTSS_COLORARG1,D3DTA_TEXTURE);dev->SetTextureStageState(0,D3DTSS_COLORARG2,D3DTA_DIFFUSE);
+    dev->SetTextureStageState(0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG2);dev->SetTextureStageState(0,D3DTSS_ALPHAARG2,D3DTA_DIFFUSE);
+    dev->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);dev->SetSamplerState(0,D3DSAMP_MAGFILTER,D3DTEXF_LINEAR);dev->SetSamplerState(0,D3DSAMP_MIPFILTER,D3DTEXF_NONE);
+    dev->SetSamplerState(0,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);dev->SetSamplerState(0,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);
+    dev->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE|D3DFVF_TEX1);dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,v,sizeof(TexVertex));
+    dev->SetTexture(0,nullptr);dev->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_SELECTARG1);dev->SetTextureStageState(0,D3DTSS_COLORARG1,D3DTA_DIFFUSE);
+    dev->SetTextureStageState(0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG1);dev->SetTextureStageState(0,D3DTSS_ALPHAARG1,D3DTA_DIFFUSE);dev->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE);
+}
+void drawArtworkCollage(IDirect3DDevice9* dev,IDirect3DSurface9* back,const D3DSURFACE_DESC& d){
+    if(!menu.choice(IT_ARTWORK))return;IDirect3DTexture9* art=currentArtwork(dev);if(!art||!copySceneTex(dev,back,d))return;
+    float w=static_cast<float>(d.Width),h=static_cast<float>(d.Height);
+    float ta=static_cast<float>(artW)/static_cast<float>(artH),sa=w/h,u0=0,v0=0,u1=1,v1=1;   // cover the screen, cropping the illustration
+    if(ta>sa){float c=(1-sa/ta)/2;u0=c;u1=1-c;}else{float c=(1-ta/sa)/2;v0=c;v1=1-c;}
+    float bx[4]={0,w,w,0},byv[4]={0,0,h,h};freeQuad(dev,art,bx,byv,u0,v0,u1,v1,0xFFFFFFFF);
+    float a=-4.f*PI/180.f,cs=std::cos(a),sn=std::sin(a),pw=w*0.6f,ph=h*0.6f,cx=w*0.5f,cy=h*0.47f;
+    auto box=[&](float hw,float hh,float ox,float oy,float (&x)[4],float (&y)[4]){const float px[4]={-hw,hw,hw,-hw},py[4]={-hh,-hh,hh,hh};
+        for(int i=0;i<4;++i){x[i]=cx+ox+px[i]*cs-py[i]*sn;y[i]=cy+oy+px[i]*sn+py[i]*cs;}};
+    float x[4],y[4],m=h*0.018f;
+    box(pw/2+m,ph/2+m*3.2f,h*0.012f,h*0.018f+m*2.2f,x,y);freeQuad(dev,nullptr,x,y,0,0,1,1,0x80000000);          // shadow
+    box(pw/2+m,ph/2+m*3.2f,0,m*2.2f,x,y);freeQuad(dev,nullptr,x,y,0,0,1,1,0xFFF4F1EA);                        // white card, deep bottom
+    box(pw/2,ph/2,0,0,x,y);freeQuad(dev,sceneTex,x,y,0,0,1,1,0xFFFFFFFF);                                       // the photo
 }
 Bars currentBars(float w,float h){return letterbox(w,h,frameAspects[std::clamp(menu.choice(IT_FRAME),0,6)]);}
-constexpr int FILTER_CAMCORDER=7;void drawCamcorderStamp(IDirect3DDevice9* dev,float w,float h,Bars bars);   // photo_ui.inc
+constexpr int FILTER_CAMCORDER=7,FILTER_VHS=8;void drawCamcorderStamp(IDirect3DDevice9* dev,float w,float h,Bars bars,bool vhs=false);   // photo_ui.inc
 // Everything that belongs to the photo: lights, FX, frame bars, logo, the camcorder date stamp.
 void drawPhotoLayers(IDirect3DDevice9* dev,IDirect3DSurface9* back,const D3DSURFACE_DESC& d){
     float w=static_cast<float>(d.Width),h=static_cast<float>(d.Height);
     drawPhotoLightsPass(dev,back,d);   // first, so blur, bloom and the filters see the light
+    drawMuzzleFlash(dev,w,h);          // part of the scene too: filters and depth of field apply to it
     if(fxNeeded())drawFx(dev,back,d);
     Bars bars=currentBars(w,h);
     // The bars reach 1 px past the screen edges: some drivers and d3d9 wrappers rasterize half a pixel off, which left
     // the top row and the left column of the picture uncovered (Cattuba's camcorder photos).
     if(bars.top>0){rect(dev,-1,-1,w+2,bars.top+1,0xFF000000);rect(dev,-1,h-bars.top,w+2,bars.top+1,0xFF000000);}
     if(bars.side>0){rect(dev,-1,-1,bars.side+1,h+2,0xFF000000);rect(dev,w-bars.side,-1,bars.side+1,h+2,0xFF000000);}
+    if(IDirect3DTexture9* fr=currentFrame(dev))quad(dev,fr,bars.side,bars.top,w-2*bars.side,h-2*bars.top,0xFFFFFFFF);   // decorative frame
     if(IDirect3DTexture9* logo=currentLogo(dev)){Box box=logoBox(w,h,static_cast<float>(logoW),static_cast<float>(logoH),menu.value[IT_LOGO_SIZE],menu.choice(IT_LOGO_POS),bars);quad(dev,logo,box.x,box.y,box.w,box.h,0xFFFFFFFF);}
     if(menu.choice(IT_FILTER)==FILTER_CAMCORDER)drawCamcorderStamp(dev,w,h,bars);
+    if(menu.choice(IT_FILTER)==FILTER_VHS)drawCamcorderStamp(dev,w,h,bars,true);
+    drawArtworkCollage(dev,back,d);   // last: the finished photo becomes the polaroid
 }
 
 // ---------- overlay (never captured) ----------
@@ -1387,6 +1850,22 @@ void drawGrid(IDirect3DDevice9* dev,float w,float h){
     if(g==2){for(int i=1;i<4;++i){vline(i/4.f);hline(i/4.f);}}
     if(g==3){float s=std::min(cw,ch)*0.03f;rect(dev,x0+cw/2-s,y0+ch/2-0.5f,2*s,1,c);rect(dev,x0+cw/2-0.5f,y0+ch/2-s,1,2*s,c);}
     if(g==4){line(dev,x0,y0,x1,y1,c);line(dev,x1,y0,x0,y1,c);}
+    if(g>=5&&g<=8){   // golden spiral (XG417): squares cut at 1/phi around the frame, a quarter arc in each; 2-4 are its mirror images
+        bool fx=g==6||g==8,fy=g==7||g==8;
+        auto P=[&](float u,float v){return std::pair<float,float>{x0+cw*(fx?1-u:u),y0+ch*(fy?1-v:v)};};
+        auto seg=[&](float u0,float v0,float u1,float v1){auto a=P(u0,v0),b=P(u1,v1);line(dev,a.first,a.second,b.first,b.second,c);};
+        auto arc=[&](float cu,float cv,float au,float av,float bu,float bv){   // centre + a*cos t + b*sin t, t in [0, pi/2]
+            float lu=cu+au,lv=cv+av;for(int i=1;i<=16;++i){float t=i*PI/32.f,u=cu+au*std::cos(t)+bu*std::sin(t),v=cv+av*std::cos(t)+bv*std::sin(t);seg(lu,lv,u,v);lu=u;lv=v;}};
+        const float gr=0.6180340f;float x=0,y=0,w=1,h=1;
+        for(int i=0;i<9;++i){
+            switch(i%4){
+            case 0:seg(x+w*gr,y,x+w*gr,y+h);arc(x+w*gr,y+h,-w*gr,0,0,-h);x+=w*gr;w*=1-gr;break;            // square on the left
+            case 1:seg(x,y+h*gr,x+w,y+h*gr);arc(x,y+h*gr,0,-h*gr,w,0);y+=h*gr;h*=1-gr;break;              // on top
+            case 2:seg(x+w*(1-gr),y,x+w*(1-gr),y+h);arc(x+w*(1-gr),y,w*gr,0,0,h);w*=1-gr;break;            // on the right
+            default:seg(x,y+h*(1-gr),x+w,y+h*(1-gr));arc(x+w,y+h*(1-gr),0,h*gr,-w,0);h*=1-gr;break;        // at the bottom
+            }
+        }
+    }
 }
 #include "photo_ui.inc"
 void setOverlayStates(IDirect3DDevice9* dev){

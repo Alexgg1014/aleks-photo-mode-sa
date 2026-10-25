@@ -54,7 +54,7 @@ int main(){
         CHECK(m.items.size()==IT_COUNT);
         bool ordered=true;for(size_t i=0;i<m.items.size();++i)if(m.items[i].id!=static_cast<ItemId>(i))ordered=false;
         CHECK(ordered);                                                   // table order matches the enum
-        CHECK(m.text(IT_GRID)=="No"&&m.adjust(IT_GRID,-1)&&m.text(IT_GRID)=="Diagonales");   // choices wrap
+        CHECK(m.text(IT_GRID)=="No"&&m.adjust(IT_GRID,-1)&&m.text(IT_GRID)=="Espiral áurea: arriba izquierda");   // choices wrap
         CHECK(m.adjust(IT_GRID,1)&&m.text(IT_GRID)=="No");
         for(int i=0;i<100;++i)m.adjust(IT_EXPOSURE,1);
         CHECK(near(m.value[IT_EXPOSURE],2)&&!m.adjust(IT_EXPOSURE,1));    // ranges clamp and report no change
@@ -106,6 +106,9 @@ int main(){
         CHECK(near(red.r,1)&&near(red.g,0)&&near(red.b,0)&&near(green.g,1)&&near(green.r,0)&&near(blue.b,1)&&near(blue.g,0));
         CHECK(near(white.r,1)&&near(white.g,1)&&near(white.b,1)&&near(wrap.r,1)&&near(wrap.g,0));
         CHECK(all.item(IT_LIGHT_COLOR).choices.back()=="Personalizado"&&LIGHT_COLOR_CUSTOM==static_cast<int>(all.item(IT_LIGHT_COLOR).max));
+        Hsv o=toHsv({1.f,.48f,.1f});Rgb back=hsvColor(o.h,o.s,o.v);CHECK(near(back.r,1,1e-3f)&&near(back.g,.48f,1e-3f)&&near(back.b,.1f,1e-3f));
+        Hsv grey=toHsv({.5f,.5f,.5f});CHECK(near(grey.s,0)&&near(grey.v,.5f));CHECK(hexColor({1,0,.3f})=="#FF004D");
+        CHECK(all.rows(TAB_LIGHTS).size()==14);   // Tono / Pureza / Brillo live in the colour picker, not in the list
         // Zoom: about 35 degrees per second at 70, the limits are 5 and 100, and it never jumps past them.
         CHECK(near(zoomFov(70,1.f/60)+35.f/60,70,0.05f)&&near(zoomFov(6,10),5)&&near(zoomFov(90,-10),100)&&zoomFov(5,1)>=5);
     }

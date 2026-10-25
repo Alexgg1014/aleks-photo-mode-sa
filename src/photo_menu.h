@@ -12,14 +12,16 @@ enum MenuTab { TAB_COMPOSE, TAB_SETTINGS, TAB_FX, TAB_LIGHTS, TAB_PHOTOS, TAB_CO
 enum ItemKind { KIND_CHOICE, KIND_RANGE, KIND_ACTION };
 enum ItemId {
     // COMPONER
-    IT_GRID, IT_FRAME, IT_HIDE_PLAYER, IT_HIDE_PEOPLE, IT_POSE, IT_POSE_FRAME, IT_EXPRESSION, IT_LOOK_AT, IT_WEAPON, IT_TIME, IT_WEATHER, IT_SLOWMO, IT_NEXT_FRAME, IT_LOGO, IT_LOGO_POS, IT_LOGO_SIZE, IT_PRESET_SLOT, IT_PRESET_SAVE, IT_PRESET_LOAD, IT_CAMERA_MODE,
+    IT_GRID, IT_FRAME, IT_OVERLAY, IT_ARTWORK, IT_HIDE_PLAYER, IT_HIDE_PEOPLE, IT_POSE, IT_POSE_FRAME, IT_CJ_TURN, IT_EXPRESSION, IT_LOOK_AT, IT_WEAPON, IT_MUZZLE_FLASH, IT_TIME, IT_WEATHER, IT_SLOWMO, IT_NEXT_FRAME, IT_LOGO, IT_LOGO_POS, IT_LOGO_SIZE, IT_PRESET_SLOT, IT_PRESET_SAVE, IT_PRESET_LOAD, IT_CAMERA_MODE,
     // AJUSTES
-    IT_MOVE_SPEED, IT_LOOK_SPEED, IT_INVERT_Y, IT_MAX_DISTANCE, IT_COLLISION, IT_OPEN_BUTTON, IT_MENU_BUTTON, IT_PROMPTS, IT_STATUS, IT_ACCENT, IT_MENU_BG, IT_ICONS,
+    IT_MOVE_SPEED, IT_LOOK_SPEED, IT_INVERT_Y, IT_MAX_DISTANCE, IT_COLLISION, IT_OPEN_BUTTON, IT_OPEN_KEY, IT_MENU_BUTTON, IT_PROMPTS, IT_STATUS, IT_ACCENT, IT_MENU_BG, IT_ICONS,
     IT_SOUNDS, IT_MUSIC, IT_MUSIC_VOLUME, IT_MOUSE_LOOK, IT_LANGUAGE, IT_CUTSCENE_CAMERA, IT_PHOTO_FOLDER, IT_GALLERY_COPY, IT_SETTINGS_RESET,
     // EFECTOS
-    IT_FILTER, IT_EXPOSURE, IT_CONTRAST, IT_SATURATION, IT_TEMPERATURE, IT_VIGNETTE, IT_GRAIN, IT_TILT, IT_TILT_FOCUS, IT_LENS_DROPS, IT_SKYGFX, IT_CHROMA, IT_BLOOM, IT_DISTORTION, IT_RADIAL_BLUR, IT_HAZE, IT_FISHEYE, IT_FISHEYE_CIRCLE, IT_FX_RESET,
+    IT_FILTER, IT_EXPOSURE, IT_CONTRAST, IT_SATURATION, IT_TEMPERATURE, IT_HIGHLIGHTS, IT_SHADOWS, IT_SPLIT_SHADOW_HUE, IT_SPLIT_SHADOW_AMOUNT, IT_SPLIT_HIGH_HUE, IT_SPLIT_HIGH_AMOUNT, IT_VIGNETTE, IT_GRAIN, IT_TILT, IT_TILT_FOCUS, IT_DOF, IT_DOF_FOCUS, IT_DOF_APERTURE, IT_LENS_DROPS, IT_SKYGFX, IT_CHROMA, IT_BLOOM, IT_DISTORTION, IT_RADIAL_BLUR, IT_HAZE, IT_FISHEYE, IT_FISHEYE_CIRCLE, IT_FX_RESET,
     // LUCES
-    IT_LIGHT_SLOT, IT_LIGHT_TYPE, IT_LIGHT_PLACE, IT_LIGHT_MOVE, IT_LIGHT_MOVE_MODE, IT_LIGHT_ON, IT_LIGHT_COLOR, IT_LIGHT_INTENSITY, IT_LIGHT_RANGE, IT_LIGHT_HUE, IT_LIGHT_SAT, IT_LIGHT_SHADOWS, IT_LIGHT_REMOVE, IT_LIGHT_CLEAR,
+    IT_LIGHT_SLOT, IT_LIGHT_TYPE, IT_LIGHT_PLACE, IT_LIGHT_MOVE, IT_LIGHT_MOVE_MODE, IT_LIGHT_ON, IT_LIGHT_COLOR, IT_LIGHT_INTENSITY, IT_LIGHT_RANGE, IT_LIGHT_CONE, IT_LIGHT_SOFT, IT_LIGHT_HUE, IT_LIGHT_SAT, IT_LIGHT_VAL, IT_LIGHT_SHADOWS, IT_LIGHT_REMOVE, IT_LIGHT_CLEAR,
+    // the muzzle flash's placement (set in its adjust panel; not shown in the lists)
+    IT_FLASH_FORWARD, IT_FLASH_UP, IT_FLASH_SIDE, IT_FLASH_SIZE, IT_FLASH_ROLL, IT_FLASH_INTENSITY,
     IT_COUNT
 };
 struct MenuItem {
@@ -60,6 +62,12 @@ inline const PoseDef poseDefs[] = {
     {"colt45", "colt45_crouchfire", "Pistola agachado"}, {"python", "python_fire", "Desert Eagle disparando"},
     {"python", "python_crouchfire", "Desert Eagle agachado"}, {"uzi", "UZI_fire", "Subfusil disparando"},
     {"rifle", "RIFLE_fire", "Rifle disparando"}, {"rifle", "RIFLE_crouchfire", "Rifle agachado"},
+    // More stances (XTC): shotguns, Tec-9, silenced pistol, crouched SMG, flamethrower and a throw.
+    {"shotgun", "shotgun_fire", "Escopeta disparando"}, {"shotgun", "shotgun_crouchfire", "Escopeta agachado"},
+    {"buddy", "buddy_fire", "Recortada disparando"}, {"buddy", "buddy_crouchfire", "Recortada agachado"},
+    {"tec", "TEC_fire", "Tec-9 disparando"}, {"tec", "TEC_crouchfire", "Tec-9 agachado"},
+    {"silenced", "Silence_fire", "Silenciador disparando"}, {"uzi", "UZI_crouchfire", "Subfusil agachado"},
+    {"flame", "FLAME_fire", "Lanzallamas"}, {"grenade", "WEAPON_throw", "Lanzando"},
 };
 // CJ expressions: facial animations from ped.ifp, applied as a partial animation over the pose.
 struct ExpressionDef { const char* anim; const char* label; };
@@ -84,29 +92,58 @@ inline Rgb hueColor(float hue, float sat) {
     sat = std::clamp(sat, 0.f, 1.f);
     return {1.f - sat + sat * c.r, 1.f - sat + sat * c.g, 1.f - sat + sat * c.b};
 }
+// Hue/saturation/brightness of a colour (the picker opens on the light's current colour, presets included).
+struct Hsv { float h, s, v; };
+inline Hsv toHsv(Rgb c) {
+    float mx = std::max(c.r, std::max(c.g, c.b)), mn = std::min(c.r, std::min(c.g, c.b)), d = mx - mn, h = 0;
+    if (d > 1e-5f) {
+        if (mx == c.r) h = 60.f * std::fmod((c.g - c.b) / d + 6.f, 6.f);
+        else if (mx == c.g) h = 60.f * ((c.b - c.r) / d + 2.f);
+        else h = 60.f * ((c.r - c.g) / d + 4.f);
+    }
+    return {h, mx > 0 ? d / mx : 0.f, mx};
+}
+inline Rgb hsvColor(float h, float s, float v) { Rgb c = hueColor(h, s); v = std::clamp(v, 0.f, 1.f); return {c.r * v, c.g * v, c.b * v}; }
+inline std::string hexColor(Rgb c) {
+    auto b = [](float f) { return static_cast<int>(std::lround(std::clamp(f, 0.f, 1.f) * 255.f)); };
+    char t[8]; std::snprintf(t, sizeof(t), "#%02X%02X%02X", b(c.r), b(c.g), b(c.b)); return t;
+}
 inline std::vector<std::string> lightColorNames() { std::vector<std::string> n; for (const LightColor& c : lightColors) n.push_back(c.label); return n; }
+inline const float apertureStops[] = {1.4f, 2.f, 2.8f, 4.f, 5.6f, 8.f, 11.f, 16.f};
 inline const float slowmoScales[] = {0.f, 0.05f, 0.1f, 0.25f, 0.5f};   // index 0 = frozen
 inline const float frameAspects[] = {0.f, 2.39f, 1.85f, 16.f/9.f, 4.f/3.f, 1.f, 4.f/5.f};
 // Accent colours (ARGB) offered in AJUSTES > Color de acento.
 // San Andreas = the pale blue of the game's own front end ("Menú principal"); Grove green; HUD money green; gold; red; white.
 inline const unsigned accentColors[] = {0xFFA8C0E6, 0xFF49A84A, 0xFF4E9A3E, 0xFFE2B649, 0xFFC8343C, 0xFFEDEDED};
+struct OpenKey { int vk; const char* label; };
+inline const OpenKey openKeys[] = {{0, "F6 (o la del .ini)"}, {116, "F5"}, {118, "F7"}, {119, "F8"}, {120, "F9"}, {121, "F10"}, {122, "F11"},
+    {192, "~ (o Ñ)"}, {45, "Insert"}, {36, "Inicio"}, {35, "Fin"}, {33, "Re Pág"}, {34, "Av Pág"}, {145, "Bloq Despl"}, {19, "Pausa"}};
+constexpr int OPEN_KEY_COUNT = static_cast<int>(sizeof(openKeys) / sizeof(openKeys[0]));
+inline std::vector<std::string> openKeyNames() { std::vector<std::string> n; for (const OpenKey& k : openKeys) n.push_back(k.label); return n; }
 enum MenuButton { MB_R1_DOWN, MB_L1_DOWN, MB_OPTIONS, MB_DOUBLE_DOWN };
 enum OpenButton { OB_R1_DOWN, OB_L1_DOWN, OB_L3_R3, OB_DOUBLE_DOWN, OB_DOUBLE_RIGHT };   // opens/closes photo mode itself
 
+inline std::vector<std::string> artworkNames() { std::vector<std::string> n{"No"}; for (int i = 1; i <= 14; ++i) n.push_back("Ilustración " + std::to_string(i)); return n; }
 inline std::vector<std::string> poseNames() { std::vector<std::string> n; for (const PoseDef& p : poseDefs) n.push_back(p.label); return n; }
 inline std::vector<MenuItem> makeMenu() {
     std::vector<std::string> weather(std::begin(weatherNames), std::end(weatherNames));
     const std::vector<std::string> yesNo{"No", "Sí"};
     return {
-        {IT_GRID, TAB_COMPOSE, KIND_CHOICE, "Rejilla", "Grid", 0, 4, 1, 0, {"No", "Tercios", "Cuadrícula", "Centro", "Diagonales"}, true},
+        {IT_GRID, TAB_COMPOSE, KIND_CHOICE, "Rejilla", "Grid", 0, 8, 1, 0, {"No", "Tercios", "Cuadrícula", "Centro", "Diagonales", "Espiral áurea: abajo derecha", "Espiral áurea: abajo izquierda", "Espiral áurea: arriba derecha", "Espiral áurea: arriba izquierda"}, true},
         {IT_FRAME, TAB_COMPOSE, KIND_CHOICE, "Marco", "Frame", 0, 6, 1, 0, {"No", "2.39:1 cine", "1.85:1", "16:9", "4:3", "1:1", "4:5 vertical"}, true},
+        // Decorative full-frame overlays: PNGs (with transparency) in the mod's Frames folder, stretched over the picture (like Cyberpunk's frames).
+        {IT_OVERLAY, TAB_COMPOSE, KIND_CHOICE, "Marco decorativo", "Overlay", 0, 0, 1, 0, {"No"}, true},
+        // The photo as a tilted polaroid on one of the game's own loading-screen illustrations (read from the player's game files).
+        {IT_ARTWORK, TAB_COMPOSE, KIND_CHOICE, "Foto sobre ilustración", "Artwork", 0, 14, 1, 0, artworkNames(), true},
         {IT_HIDE_PLAYER, TAB_COMPOSE, KIND_CHOICE, "Ocultar a CJ", "HidePlayer", 0, 1, 1, 0, yesNo, true},
         {IT_HIDE_PEOPLE, TAB_COMPOSE, KIND_CHOICE, "Ocultar personas", "", 0, 1, 1, 0, yesNo, false},
         {IT_POSE, TAB_COMPOSE, KIND_CHOICE, "Pose de CJ", "", 0, static_cast<float>(POSE_COUNT - 1), 1, 0, poseNames(), false},
         {IT_POSE_FRAME, TAB_COMPOSE, KIND_RANGE, "Momento de la pose", "", 0, 100, 5, 50, {}, false},
+        {IT_CJ_TURN, TAB_COMPOSE, KIND_RANGE, "Girar a CJ", "", 0, 345, 15, 0, {}, false},
         {IT_EXPRESSION, TAB_COMPOSE, KIND_CHOICE, "Expresión", "", 0, static_cast<float>(EXPRESSION_COUNT - 1), 1, 0, expressionNames(), false},
         {IT_LOOK_AT, TAB_COMPOSE, KIND_CHOICE, "Mirar a la cámara", "", 0, 1, 1, 0, yesNo, false},
         {IT_WEAPON, TAB_COMPOSE, KIND_CHOICE, "Arma en la mano", "", 0, static_cast<float>(WEAPON_CHOICE_COUNT - 1), 1, 0, weaponNames(), false},
+        {IT_MUZZLE_FLASH, TAB_COMPOSE, KIND_CHOICE, "Fogonazo del arma", "", 0, 1, 1, 0, yesNo, false},
         {IT_TIME, TAB_COMPOSE, KIND_RANGE, "Hora", "Time", -0.5f, 23.5f, 0.5f, -0.5f, {}, false},
         {IT_WEATHER, TAB_COMPOSE, KIND_CHOICE, "Clima", "Weather", 0, static_cast<float>(weather.size() - 1), 1, 0, weather, false},
         {IT_SLOWMO, TAB_COMPOSE, KIND_CHOICE, "Tiempo", "TimeScale", 0, 4, 1, 0, {"Congelado", "Lento 0.05x", "Lento 0.1x", "Lento 0.25x", "Lento 0.5x"}, false},
@@ -124,6 +161,8 @@ inline std::vector<MenuItem> makeMenu() {
         {IT_MAX_DISTANCE, TAB_SETTINGS, KIND_RANGE, "Distancia máxima", "MaxDistance", 20, 500, 10, 160, {}, false},
         {IT_COLLISION, TAB_SETTINGS, KIND_CHOICE, "Colisión", "Collision", 0, 1, 1, 1, yesNo, false},
         {IT_OPEN_BUTTON, TAB_SETTINGS, KIND_CHOICE, "Abrir modo foto con", "OpenButton", 0, 4, 1, 0, {"R1 + abajo", "L1 + abajo", "L3 + R3 (mantener)", "Doble toque abajo", "Doble toque derecha"}, false},
+        // Keyboard key that opens/closes photo mode (Cattuba: F6 needs Fn on laptops). The first choice keeps KeyboardKey= from the INI.
+        {IT_OPEN_KEY, TAB_SETTINGS, KIND_CHOICE, "Tecla de teclado", "OpenKey", 0, static_cast<float>(OPEN_KEY_COUNT - 1), 1, 0, openKeyNames(), false},
         {IT_MENU_BUTTON, TAB_SETTINGS, KIND_CHOICE, "Abrir menú con", "MenuButton", 0, 3, 1, 2, {"R1 + abajo", "L1 + abajo", "Options", "Doble toque abajo"}, false},
         {IT_PROMPTS, TAB_SETTINGS, KIND_CHOICE, "Ayuda de controles", "Prompts", 0, 1, 1, 1, yesNo, false},
         {IT_STATUS, TAB_SETTINGS, KIND_CHOICE, "Mostrar estado", "Status", 0, 1, 1, 1, yesNo, false},
@@ -142,15 +181,26 @@ inline std::vector<MenuItem> makeMenu() {
         // Also writes a JPG copy named gallery1.jpg, gallery2.jpg... into User Files\Gallery, the files the game's (and SkyUI's) gallery shows.
         {IT_GALLERY_COPY, TAB_SETTINGS, KIND_CHOICE, "Copia JPG para la galería", "GalleryCopy", 0, 1, 1, 0, yesNo, false},
         {IT_SETTINGS_RESET, TAB_SETTINGS, KIND_ACTION, "Restablecer ajustes", "", 0, 0, 0, 0, {}, false},
-        {IT_FILTER, TAB_FX, KIND_CHOICE, "Filtro", "Filter", 0, 7, 1, 0, {"Ninguno", "Blanco y negro", "Sepia", "Frío", "Cálido", "Vintage", "Polaroid", "Cámara de los 90"}, true},
+        {IT_FILTER, TAB_FX, KIND_CHOICE, "Filtro", "Filter", 0, 8, 1, 0, {"Ninguno", "Blanco y negro", "Sepia", "Frío", "Cálido", "Vintage", "Polaroid", "Cámara de los 90", "VHS"}, true},
         {IT_EXPOSURE, TAB_FX, KIND_RANGE, "Exposición", "Exposure", -2, 2, 0.1f, 0, {}, true},
         {IT_CONTRAST, TAB_FX, KIND_RANGE, "Contraste", "Contrast", -50, 50, 5, 0, {}, true},
         {IT_SATURATION, TAB_FX, KIND_RANGE, "Saturación", "Saturation", -100, 100, 5, 0, {}, true},
         {IT_TEMPERATURE, TAB_FX, KIND_RANGE, "Temperatura", "Temperature", -100, 100, 5, 0, {}, true},
+        {IT_HIGHLIGHTS, TAB_FX, KIND_RANGE, "Altas luces", "Highlights", -100, 100, 5, 0, {}, true},
+        {IT_SHADOWS, TAB_FX, KIND_RANGE, "Sombras", "Shadows", -100, 100, 5, 0, {}, true},
+        // Split toning (Cyberpunk's Color Balance, the photo editor way): one tint for the shadows, another for the highlights.
+        {IT_SPLIT_SHADOW_HUE, TAB_FX, KIND_RANGE, "Tono de sombras", "SplitShadowHue", 0, 350, 10, 210, {}, true},
+        {IT_SPLIT_SHADOW_AMOUNT, TAB_FX, KIND_RANGE, "Color en sombras", "SplitShadowAmount", 0, 100, 5, 0, {}, true},
+        {IT_SPLIT_HIGH_HUE, TAB_FX, KIND_RANGE, "Tono de luces", "SplitHighHue", 0, 350, 10, 40, {}, true},
+        {IT_SPLIT_HIGH_AMOUNT, TAB_FX, KIND_RANGE, "Color en luces", "SplitHighAmount", 0, 100, 5, 0, {}, true},
         {IT_VIGNETTE, TAB_FX, KIND_RANGE, "Viñeta", "Vignette", 0, 100, 5, 0, {}, true},
         {IT_GRAIN, TAB_FX, KIND_RANGE, "Grano", "Grain", 0, 100, 5, 0, {}, true},
         {IT_TILT, TAB_FX, KIND_RANGE, "Desenfoque de bordes", "TiltShift", 0, 100, 5, 0, {}, true},
         {IT_TILT_FOCUS, TAB_FX, KIND_RANGE, "Altura del foco", "TiltFocus", 0, 100, 5, 50, {}, true},
+        // Depth of field over SimpleDepthBuffer's linear depth (peter_99, optional): manual focus distance or focus on CJ, and the aperture.
+        {IT_DOF, TAB_FX, KIND_CHOICE, "Profundidad de campo", "DepthOfField", 0, 3, 1, 0, {"No", "Manual", "Enfocar a CJ", "Ver enfoque"}, true},
+        {IT_DOF_FOCUS, TAB_FX, KIND_RANGE, "Distancia de enfoque", "FocusDistance", 0.5f, 60, 0.5f, 5, {}, true},
+        {IT_DOF_APERTURE, TAB_FX, KIND_CHOICE, "Apertura", "Aperture", 0, 7, 1, 2, {"f/1.4", "f/2", "f/2.8", "f/4", "f/5.6", "f/8", "f/11", "f/16"}, true},
         {IT_LENS_DROPS, TAB_FX, KIND_RANGE, "Gotas en la lente", "LensDrops", 0, 100, 5, 0, {}, true},
         // SkyGfx preset: choices filled at runtime from skygfx.asi; no key, so it is never saved (the game keeps its own preset)
         {IT_SKYGFX, TAB_FX, KIND_CHOICE, "Preset de SkyGfx", "", 0, 0, 1, 0, {"No disponible"}, false},
@@ -171,11 +221,21 @@ inline std::vector<MenuItem> makeMenu() {
         {IT_LIGHT_COLOR, TAB_LIGHTS, KIND_CHOICE, "Color", "", 0, static_cast<float>(LIGHT_COLOR_COUNT - 1), 1, 0, lightColorNames(), false},
         {IT_LIGHT_INTENSITY, TAB_LIGHTS, KIND_RANGE, "Intensidad", "", 5, 100, 5, 60, {}, false},
         {IT_LIGHT_RANGE, TAB_LIGHTS, KIND_RANGE, "Alcance", "", 2, 40, 1, 10, {}, false},
-        {IT_LIGHT_HUE, TAB_LIGHTS, KIND_RANGE, "Tono", "", 0, 350, 10, 30, {}, false},   // changing it switches Color to Personalizado
-        {IT_LIGHT_SAT, TAB_LIGHTS, KIND_RANGE, "Pureza del color", "", 0, 100, 5, 60, {}, false},
+        {IT_LIGHT_CONE, TAB_LIGHTS, KIND_RANGE, "Apertura del reflector", "", 10, 80, 2, 36, {}, false},   // half angle, spotlight only
+        {IT_LIGHT_SOFT, TAB_LIGHTS, KIND_RANGE, "Suavidad del borde", "", 0, 100, 5, 45, {}, false},
+        // The custom colour (hue, purity, brightness) is set in the colour picker (X on LUCES > Color); these rows are not shown (TAB_COUNT).
+        {IT_LIGHT_HUE, TAB_COUNT, KIND_RANGE, "Tono", "", 0, 359, 1, 30, {}, false},
+        {IT_LIGHT_SAT, TAB_COUNT, KIND_RANGE, "Pureza del color", "", 0, 100, 1, 60, {}, false},
+        {IT_LIGHT_VAL, TAB_COUNT, KIND_RANGE, "Brillo", "", 0, 100, 1, 100, {}, false},
         {IT_LIGHT_SHADOWS, TAB_LIGHTS, KIND_CHOICE, "Sombras", "LightShadows", 0, 1, 1, 1, yesNo, false},   // with Proper Shaders only
         {IT_LIGHT_REMOVE, TAB_LIGHTS, KIND_ACTION, "Quitar esta luz", "", 0, 0, 0, 0, {}, false},
         {IT_LIGHT_CLEAR, TAB_LIGHTS, KIND_ACTION, "Quitar todas las luces", "", 0, 0, 0, 0, {}, false},
+        {IT_FLASH_FORWARD, TAB_COUNT, KIND_RANGE, "Adelante", "FlashForward", -2.5f, 2.5f, 0.01f, 0, {}, false},
+        {IT_FLASH_UP, TAB_COUNT, KIND_RANGE, "Arriba", "FlashUp", -1.5f, 1.5f, 0.01f, 0, {}, false},
+        {IT_FLASH_SIDE, TAB_COUNT, KIND_RANGE, "Lado", "FlashSide", -1.5f, 1.5f, 0.01f, 0, {}, false},
+        {IT_FLASH_SIZE, TAB_COUNT, KIND_RANGE, "Tamaño", "FlashSize", 0.1f, 1.5f, 0.05f, 0.45f, {}, false},
+        {IT_FLASH_ROLL, TAB_COUNT, KIND_RANGE, "Giro", "FlashRoll", 0, 355, 5, 0, {}, false},
+        {IT_FLASH_INTENSITY, TAB_COUNT, KIND_RANGE, "Intensidad", "FlashIntensity", 0.1f, 2, 0.05f, 1, {}, false},
     };
 }
 
@@ -230,7 +290,7 @@ struct MenuState {
         std::vector<std::pair<std::string, std::string>> out; char b[32];
         for (const MenuItem& i : items) {
             if (!*i.key || (presetOnly && !i.preset)) continue;
-            if (i.id == IT_LOGO) { out.push_back({i.key, i.choices[static_cast<size_t>(choice(IT_LOGO))]}); continue; }   // logos stored by file name
+            if (i.id == IT_LOGO || i.id == IT_OVERLAY) { out.push_back({i.key, i.choices[static_cast<size_t>(choice(i.id))]}); continue; }   // logos and frames stored by name
             std::snprintf(b, sizeof(b), "%g", value[i.id]); out.push_back({i.key, b});
         }
         return out;
@@ -238,7 +298,7 @@ struct MenuState {
     void load(const char* key, const char* text) {
         for (MenuItem& i : items) {
             if (!*i.key || std::strcmp(i.key, key) != 0) continue;
-            if (i.id == IT_LOGO) { for (size_t c = 0; c < i.choices.size(); ++c) if (i.choices[c] == text) value[i.id] = static_cast<float>(c); return; }
+            if (i.id == IT_LOGO || i.id == IT_OVERLAY) { for (size_t c = 0; c < i.choices.size(); ++c) if (i.choices[c] == text) value[i.id] = static_cast<float>(c); return; }
             char* end = nullptr; float v = std::strtof(text, &end);
             if (end != text && std::isfinite(v)) value[i.id] = i.kind == KIND_RANGE ? std::clamp(v, i.min, i.max) : std::clamp(std::round(v), 0.f, i.max);
             return;
@@ -281,9 +341,17 @@ inline const Translation translations[] = {
     {"Intensidad","Intensity"},{"Alcance","Range"},{"Quitar todas las luces","Remove all lights"},
     {"Blanco cálido","Warm white"},{"Personalizado","Custom"},{"Tono","Hue"},{"Pureza del color","Colour purity"},
     {"Carpeta de fotos","Photo folder"},{"Imágenes","Pictures"},{"Galería del juego","Game gallery"},{"Junto al mod","Next to the mod"},{"Copia JPG para la galería","JPG copy for the gallery"},
-    {"Ojo de pez","Fisheye"},{"Borde circular","Round border"},{"Blanco frío","Cool white"},{"Azul","Blue"},{"Verde","Green"},{"Naranja","Orange"},{"Morado","Purple"},{"Rosa","Pink"},{"Amarillo","Yellow"},
+    {"Ojo de pez","Fisheye"},{"Profundidad de campo","Depth of field"},{"Distancia de enfoque","Focus distance"},{"Apertura","Aperture"},{"Enfocar a CJ","Focus on CJ"},{"Ver enfoque","Show focus"},{"Restablecer","Reset"},{"Acercar / alejar","Closer / farther"},{"Manual","Manual"},
+    {"f/1.4","f/1.4"},{"f/2","f/2"},{"f/2.8","f/2.8"},{"f/4","f/4"},{"f/5.6","f/5.6"},{"f/8","f/8"},{"f/11","f/11"},{"f/16","f/16"},
+    {"La profundidad de campo necesita SimpleDepthBuffer","Depth of field needs SimpleDepthBuffer"},{"Marco decorativo","Decorative frame"},{"Foto sobre ilustración","Photo on artwork"},{"Ilustración 1","Artwork 1"},{"Ilustración 2","Artwork 2"},{"Ilustración 3","Artwork 3"},{"Ilustración 4","Artwork 4"},{"Ilustración 5","Artwork 5"},{"Ilustración 6","Artwork 6"},{"Ilustración 7","Artwork 7"},{"Ilustración 8","Artwork 8"},{"Ilustración 9","Artwork 9"},{"Ilustración 10","Artwork 10"},{"Ilustración 11","Artwork 11"},{"Ilustración 12","Artwork 12"},{"Ilustración 13","Artwork 13"},{"Ilustración 14","Artwork 14"},{"Girar a CJ","Turn CJ"},{"Fogonazo del arma","Muzzle flash"},{"Altas luces","Highlights"},
+    {"Tono de sombras","Shadow tint"},{"Color en sombras","Shadow tint amount"},{"Tono de luces","Highlight tint"},{"Color en luces","Highlight tint amount"},
+    {"Apertura del reflector","Spotlight angle"},{"Suavidad del borde","Edge softness"},{"Pulsa Esc otra vez para salir","Press Esc again to exit"},
+    {"Escopeta disparando","Shotgun firing"},{"Escopeta agachado","Shotgun, crouched"},{"Recortada disparando","Sawn-off firing"},{"Recortada agachado","Sawn-off, crouched"},
+    {"Tec-9 disparando","Tec-9 firing"},{"Tec-9 agachado","Tec-9, crouched"},{"Silenciador disparando","Silenced pistol firing"},{"Subfusil agachado","SMG, crouched"},
+    {"Lanzallamas","Flamethrower"},{"Lanzando","Throwing"},{"Brillo","Brightness"},{"Aceptar","OK"},{"Cancelar","Cancel"},{"Color de la luz","Light colour"},{"Pulsa X para elegir","Press X to pick"},{"Pulsa Enter para elegir","Press Enter to pick"},{"Borde circular","Round border"},{"Blanco frío","Cool white"},{"Azul","Blue"},{"Verde","Green"},{"Naranja","Orange"},{"Morado","Purple"},{"Rosa","Pink"},{"Amarillo","Yellow"},
     {"Luz colocada","Light placed"},{"Las poses necesitan Tiempo: Congelado","Poses need Time: Frozen"},{"Mover luz","Move light"},{"Modo de movimiento","Move mode"},{"Alrededor de CJ","Around CJ"},{"Quitar esta luz","Remove this light"},{"Sombras","Shadows"},{"Luz quitada","Light removed"},{"Mueve la luz con el stick o WASD, gírala con la cámara. X / Enter la suelta","Move the light with the stick or WASD, aim it with the look controls. X / Enter drops it"},{"Pulsa Derecha","Press Right"},{"Moviendo","Moving"},{"Luces quitadas","Lights removed"},{"Primero coloca la luz","Place the light first"},
-    {"Rejilla","Grid"},{"Tercios","Thirds"},{"Cuadrícula","Squares"},{"Centro","Centre"},{"Diagonales","Diagonals"},
+    {"Rejilla","Grid"},{"Tercios","Thirds"},{"Cuadrícula","Squares"},{"Centro","Centre"},{"Diagonales","Diagonals"},{"Espiral áurea: abajo derecha","Golden spiral: bottom right"},{"Espiral áurea: abajo izquierda","Golden spiral: bottom left"},{"Espiral áurea: arriba derecha","Golden spiral: top right"},{"Espiral áurea: arriba izquierda","Golden spiral: top left"},
+    {"Adelante","Forward"},{"Arriba","Up"},{"Lado","Side"},{"Tamaño","Size"},{"Giro","Roll"},{"Ajustar fogonazo","Adjust muzzle flash"},{"Mover","Move"},{"Subir / bajar","Up / down"},
     {"Marco","Frame"},{"2.39:1 cine","2.39:1 cinema"},{"1.85:1","1.85:1"},{"16:9","16:9"},{"4:3","4:3"},{"1:1","1:1"},{"4:5 vertical","4:5 portrait"},
     {"Ocultar a CJ","Hide CJ"},{"No","Off"},{"Sí","On"},{"Hora","Time of day"},{"Sin cambio","Unchanged"},
     {"Clima","Weather"},{"Tiempo","Time"},{"Congelado","Frozen"},{"Lento 0.05x","Slow 0.05x"},{"Lento 0.1x","Slow 0.1x"},{"Lento 0.25x","Slow 0.25x"},{"Lento 0.5x","Slow 0.5x"},
@@ -291,13 +359,14 @@ inline const Translation translations[] = {
     {"Tamaño del logo","Logo size"},{"Preset","Preset"},{"Guardar preset","Save preset"},{"Cargar preset","Load preset"},
     {"Velocidad de cámara","Camera speed"},{"Sensibilidad","Look sensitivity"},{"Invertir eje Y","Invert Y axis"},{"Distancia máxima","Max distance"},{"Colisión","Collision"},
     {"Abrir modo foto con","Open photo mode with"},{"R1 + abajo","R1 + down"},{"L1 + abajo","L1 + down"},{"L3 + R3 (mantener)","L3 + R3 (hold)"},{"Doble toque abajo","Double tap down"},{"Doble toque derecha","Double tap right"},
-    {"Abrir menú con","Open menu with"},{"Options","Options"},
+    {"Abrir menú con","Open menu with"},{"Tecla de teclado","Keyboard key"},{"F6 (o la del .ini)","F6 (or the .ini's)"},{"~ (o Ñ)","~ (or Ñ)"},{"Insert","Insert"},{"Inicio","Home"},{"Fin","End"},{"Re Pág","Page Up"},{"Av Pág","Page Down"},{"Bloq Despl","Scroll Lock"},{"Pausa","Pause"},
+    {"F5","F5"},{"F7","F7"},{"F8","F8"},{"F9","F9"},{"F10","F10"},{"F11","F11"},{"Options","Options"},
     {"Ayuda de controles","Button prompts"},{"Mostrar estado","Show status"},{"Color de acento","Accent colour"},{"San Andreas","San Andreas"},{"Grove Street","Grove Street"},{"Dinero","Money"},{"Dorado","Gold"},{"Rojo","Red"},{"Blanco","White"},
     {"Fondo del menú","Menu background"},{"Translúcido","Translucent"},{"Oscuro","Dark"},{"Opaco","Opaque"},
     {"Íconos de botones","Button icons"},{"Auto (GInput)","Auto (GInput)"},{"PlayStation","PlayStation"},{"Xbox","Xbox"},
     {"Sonidos","Sounds"},{"Música","Music"},{"Volumen de música","Music volume"},{"Sensibilidad del ratón","Mouse sensitivity"},
     {"Idioma","Language"},{"Auto (juego)","Auto (game)"},{"Español","Español"},{"English","English"},{"Restablecer ajustes","Reset settings"},
-    {"Filtro","Filter"},{"Ninguno","None"},{"Blanco y negro","Black & white"},{"Sepia","Sepia"},{"Frío","Cold"},{"Cálido","Warm"},{"Vintage","Vintage"},{"Polaroid","Polaroid"},{"Cámara de los 90","90s camcorder"},{"Preset de SkyGfx","SkyGfx preset"},{"No disponible","Not available"},
+    {"Filtro","Filter"},{"Ninguno","None"},{"Blanco y negro","Black & white"},{"Sepia","Sepia"},{"Frío","Cold"},{"Cálido","Warm"},{"Vintage","Vintage"},{"Polaroid","Polaroid"},{"Cámara de los 90","90s camcorder"},{"VHS","VHS"},{"Preset de SkyGfx","SkyGfx preset"},{"No disponible","Not available"},
     {"Exposición","Exposure"},{"Contraste","Contrast"},{"Saturación","Saturation"},{"Temperatura","Temperature"},{"Viñeta","Vignette"},{"Grano","Grain"},
     {"Desenfoque de bordes","Edge blur"},{"Altura del foco","Focus height"},{"Gotas en la lente","Lens drops"},{"Restablecer efectos","Reset effects"},
     {"Muy soleado LS","Extra sunny LS"},{"Soleado LS","Sunny LS"},{"Smog LS","Smog LS"},{"Soleado con smog LS","Sunny smog LS"},{"Nublado LS","Cloudy LS"},

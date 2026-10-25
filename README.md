@@ -32,6 +32,8 @@ All shots taken in game with the mod. No editing.
 - **Lights**: up to 3 point lights, spotlights or a camera flash. **Move light** moves and aims a light while the camera stays put (like Alan Wake 2's portrait spot), or orbits it around CJ. With Proper Shaders the mod draws the lights itself, with **shadows** and smooth shading. Without Proper they go through the game's own lights. Pick a preset colour or any colour with **Hue** and **Colour purity**.
 - **Photo FX**: filters (B&W, sepia, cold, warm, vintage, Polaroid, 90s camcorder), exposure, contrast, saturation, temperature, vignette, grain, tilt-shift, lens drops, chromatic aberration, bloom, lens distortion, radial blur, haze and a **fisheye** lens (full frame or round border).
 - **Composition**: grids, cinematic frames (2.39:1, 16:9, 4:5…), logo overlays and presets.
+- **Depth of field**: manual focus or focus on CJ, aperture f/1.4 to f/16. Uses Proper Shaders' depth, or SimpleDepthBuffer by peter_99 (ships with his Real Camera) without Proper.
+- **Muzzle flash** you can place, size and dim, **turn CJ**, **decorative frames** and **photo on artwork** (the game's loading-screen art).
 - **Photo viewer** inside the game. Live **SkyGfx** preset switching.
 - **Game gallery**: an optional JPG copy (`gallery1.jpg`, `gallery2.jpg`...) goes to `User Files\Gallery`, so your photos show in the game's Gallery (SkyUI). You can also pick where the PNGs go.
 - Spanish and English UI. Gamepad (with GInput button icons) and keyboard/mouse.
@@ -83,7 +85,8 @@ Every game address is for GTA SA 1.0 US and was checked against [DK22Pac's plugi
 - The photo modes of **The Last of Us Part II** and **Alan Wake 2** inspired the CJ poses and expressions, look-at-camera, the orbit camera and the movable lights.
 - **XTC**, for the CJ pose idea and the reference that got the pose library started.
 - Developed with the help of **Claude** (Anthropic's AI) for the coding, reverse engineering and debugging. Design, testing and every in-game check were done by Alexgg1014.
-- Thanks to the community for the feedback and bug reports: Georgian, Daviserys, XTC, XG417, adambrock, MortalEyes, Cattuba, ksatria, diego brando and everyone in the server.
+- Thanks to the community for the feedback and bug reports: Georgian, Daviserys, XTC, XG417, adambrock, MortalEyes, Cattuba, ksatria, diego brando, eCoJ, frnchise and everyone in the server.
+- **peter_99** for SimpleDepthBuffer (depth for the DOF and for lights without Proper) and Real Camera.
 - [DK22Pac's plugin-sdk](https://github.com/DK22Pac/plugin-sdk) and the reverse-engineering community, for the documented addresses and structures.
 
 ## License

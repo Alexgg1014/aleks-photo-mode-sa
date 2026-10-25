@@ -8,6 +8,7 @@ FontAtlas bodyFont,titleFont;
 float uiAlpha=1.f;   // multiplies every overlay colour (fades)
 DWORD fadeColor(DWORD c,float extra=1.f){float a=static_cast<float>(c>>24)*uiAlpha*extra;return (static_cast<DWORD>(std::clamp(a,0.f,255.f))<<24)|(c&0xFFFFFF);}
 void frect(IDirect3DDevice9* dev,float x,float y,float w,float h,DWORD c){rect(dev,x,y,w,h,fadeColor(c));}
+DWORD argb(Rgb c){auto b=[](float f){return static_cast<DWORD>(std::lround(std::clamp(f,0.f,1.f)*255.f));};return 0xFF000000u|(b(c.r)<<16)|(b(c.g)<<8)|b(c.b);}
 // Builds a white-on-transparent glyph atlas with GDI (Latin-1: Spanish accents, ñ, ¿, ¡).
 void buildFont(IDirect3DDevice9* dev,FontAtlas& f,const wchar_t* iniKey,const wchar_t* preferred,const wchar_t* fallback,int weight,float px){
     f.tried=true;f.px=px;
@@ -123,7 +124,10 @@ void drawMenu(IDirect3DDevice9* dev,float w,float h,float k){
     float slide=(1-easeOut(menuShow))*-60*k;float saved=uiAlpha;uiAlpha*=easeOut(menuShow);
     float x0=48*k+slide,y0=56*k,pw=580*k,headerH=74*k,tabH=44*k,rowH=36*k,footH=46*k,pad=24*k;
     auto rows=menu.rows(menu.tab);bool photosTab=menu.tab==TAB_PHOTOS;
-    float bodyH=photosTab?rowH*7.2f:rowH*static_cast<float>(rows.size())+12*k;
+    // Long tabs (EFECTOS has 25 rows) scroll: as many rows as fit on screen, the selected one kept near the middle.
+    int count=static_cast<int>(rows.size()),maxRows=std::max(6,static_cast<int>((h-y0-headerH-tabH-footH-40*k)/rowH));
+    int shown=std::min(count,maxRows),first=count>shown?std::clamp(menu.row-shown/2,0,count-shown):0;
+    float bodyH=photosTab?rowH*7.2f:rowH*static_cast<float>(shown)+12*k;
     float ph=headerH+tabH+bodyH+footH;
     DWORD acc=accent();
     frect(dev,x0,y0,pw,ph,panelColor());
@@ -152,18 +156,23 @@ void drawMenu(IDirect3DDevice9* dev,float w,float h,float k){
             if(confirmDelete)text(dev,x0+pw/2,by+6*k+(gh+8*k)*2+32*k,"Pulsa □ otra vez para enviar a la papelera",acc,18*k,CENTER);
         }
     }else{
-        int count=static_cast<int>(rows.size());float target2=by+rowH*static_cast<float>(menu.row);
+        float target2=by+rowH*static_cast<float>(menu.row-first);
         if(selY<0)selY=target2;selY=approach(selY,target2,24);
         frect(dev,x0+8*k,selY,pw-16*k,rowH-2*k,withAlpha(acc,0x26));
         star(dev,x0+pad-4*k,selY+rowH*0.46f,9*k,acc);
-        for(int i=0;i<count;++i){
-            ItemId id=rows[static_cast<size_t>(i)];bool sel=i==menu.row;const MenuItem& it=menu.item(id);float y=by+rowH*i+7*k;
+        if(shown<count){   // scroll bar
+            float th=bodyH-12*k,bh=th*shown/count,bt=by+th*first/count;frect(dev,x0+pw-6*k,by,3*k,th,0x30FFFFFF);frect(dev,x0+pw-6*k,bt,3*k,bh,withAlpha(acc,0xC0));}
+        for(int i=first;i<first+shown;++i){
+            ItemId id=rows[static_cast<size_t>(i)];bool sel=i==menu.row;const MenuItem& it=menu.item(id);float y=by+rowH*(i-first)+7*k;
             text(dev,x0+pad+14*k,y,it.label,sel?SA_TEXT:SA_DIM,20*k);
             if(it.kind==KIND_ACTION){
                 const char* hint=id==IT_NEXT_FRAME?"Pulsa Derecha":(id==IT_LIGHT_MOVE&&movingLight>=0)?"Moviendo":lastInputKeyboard?"Pulsa Enter":"Pulsa X";
                 if(sel||(id==IT_LIGHT_MOVE&&movingLight>=0))text(dev,x0+pw-pad,y,hint,acc,18*k,RIGHT);continue;}
             std::string v=tr(menu.text(id).c_str(),uiLang);if(sel)v="<  "+v+"  >";
             text(dev,x0+pw-pad,y,v.c_str(),sel?acc:SA_DIM,20*k,RIGHT);
+            if(id==IT_LIGHT_COLOR){   // swatch of the light's colour; X / Enter opens the picker
+                Rgb c=lightRgb(photoLights[std::clamp(menu.choice(IT_LIGHT_SLOT),0,PHOTO_LIGHTS-1)]);float sx=x0+pw-pad-textW(v.c_str(),20*k)-30*k;
+                frect(dev,sx,y+1*k,20*k,20*k,0xFFFFFFFF);frect(dev,sx+2*k,y+3*k,16*k,16*k,argb(c));}
         }
     }
     // Footer hints
@@ -225,10 +234,12 @@ void drawPrompts(IDirect3DDevice9* dev,float w,float h,float k){
     text(dev,x1-14*k,y0+ph-40*k,"Modo foto",acc,30*k,RIGHT,false,titleFont);
     uiAlpha=saved;
 }
-void drawStatus(IDirect3DDevice9* dev,float w,float k){
+void drawStatus(IDirect3DDevice9* dev,float w,float h,float k){
     if(!menu.on(IT_STATUS))return;
     char a[48];std::snprintf(a,sizeof(a),"FOV %d",static_cast<int>(fov+0.5f));
     float x=w-26*k,y=20*k;
+    if(menu.choice(IT_LOGO)&&menu.choice(IT_LOGO_POS)==2&&logoTex){   // a logo top right: the status goes under it
+        Box box=logoBox(w,h,static_cast<float>(logoW),static_cast<float>(logoH),menu.value[IT_LOGO_SIZE],2,currentBars(w,h));y=box.y+box.h+10*k;}
     text(dev,x,y,a,0xFFFFFFFF,22*k,RIGHT,true);
     float s=slowmoScales[std::clamp(menu.choice(IT_SLOWMO),0,4)];char b[48];
     if(s>0)std::snprintf(b,sizeof(b),"%s %.2gx",tr("Cámara lenta",uiLang),s);else std::snprintf(b,sizeof(b),"%s",tr("Congelado",uiLang));
@@ -256,6 +267,71 @@ void drawToast(IDirect3DDevice9* dev,float w,float k){
     uiAlpha=saved;
 }
 void drawLightMarkers(IDirect3DDevice9* dev,float w,float h,float k);extern int movingLight;
+// ---------- muzzle flash adjust panel ----------
+void drawFlashEdit(IDirect3DDevice9* dev,float k){
+    if(!flashEditOpen())return;
+    float saved=uiAlpha;uiAlpha*=easeOut(menuShow);DWORD acc=accent();
+    float pad=20*k,pw=400*k,x0=48*k+580*k+14*k,y0=56*k,rowH=34*k;
+    const ItemId rows[]={IT_FLASH_FORWARD,IT_FLASH_UP,IT_FLASH_SIDE,IT_FLASH_SIZE,IT_FLASH_ROLL,IT_FLASH_INTENSITY};
+    float ph=60*k+rowH*6+70*k;frect(dev,x0,y0,pw,ph,panelColor());
+    text(dev,x0+pad,y0+16*k,"Ajustar fogonazo",SA_TEXT,22*k);frect(dev,x0+pad,y0+48*k,pw-pad*2,2*k,withAlpha(acc,0x70));
+    for(int i=0;i<6;++i){float y=y0+60*k+rowH*i;text(dev,x0+pad,y,menu.item(rows[i]).label,SA_DIM,19*k);
+        char v[32];std::snprintf(v,sizeof(v),rows[i]==IT_FLASH_ROLL?"%.0f":"%+.2f",menu.value[rows[i]]);text(dev,x0+pw-pad,y,v,SA_TEXT,19*k,RIGHT);}
+    float fy=y0+60*k+rowH*6+14*k,fx=x0+pad,is=22*k;frect(dev,x0+pad,fy-6*k,pw-pad*2,1*k,withAlpha(acc,0x50));
+    auto lab=[&](const char* t){text(dev,fx+3*k,fy+2*k,t,SA_DIM,16*k);fx+=textW(t,16*k)+12*k;};
+    if(lastInputKeyboard){auto cap=[&](const char* a){float wcap=std::max(is,textW(a,is*0.62f)+is*0.5f);keycap(dev,fx+wcap,fy,is,a);fx+=wcap+3*k;};
+        cap("WASD");lab("Mover");cap("Q");cap("E");lab("Tamaño");cap("Supr");lab("Restablecer");fy+=30*k;fx=x0+pad;cap("Enter");lab("Aceptar");cap("Esc");lab("Cancelar");}
+    else{auto ic=[&](Icon a){icon(dev,fx,fy,is,a);fx+=is+3*k;};
+        ic(IC_THUMBL);lab("Mover");ic(IC_L2);ic(IC_R2);lab("Acercar / alejar");ic(IC_L1);ic(IC_R1);lab("Tamaño");fy+=30*k;fx=x0+pad;ic(IC_THUMBR);lab("Giro");ic(IC_SQUARE);lab("Restablecer");ic(IC_CROSS);lab("Aceptar");ic(IC_CIRCLE);lab("Cancelar");}
+    uiAlpha=saved;
+}
+// ---------- light colour picker panel (beside the menu) ----------
+void gradientCells(IDirect3DDevice9* dev,float x,float y,float w,float h,int cols,int rows,const std::function<DWORD(float,float)>& at){
+    std::vector<Vertex> v;v.reserve(static_cast<size_t>(cols)*rows*6);
+    for(int j=0;j<rows;++j)for(int i=0;i<cols;++i){
+        float u0=static_cast<float>(i)/cols,u1=static_cast<float>(i+1)/cols,v0=static_cast<float>(j)/rows,v1=static_cast<float>(j+1)/rows;
+        Vertex a{x+w*u0,y+h*v0,0,1,fadeColor(at(u0,v0))},b{x+w*u1,y+h*v0,0,1,fadeColor(at(u1,v0))},c{x+w*u0,y+h*v1,0,1,fadeColor(at(u0,v1))},d{x+w*u1,y+h*v1,0,1,fadeColor(at(u1,v1))};
+        v.push_back(a);v.push_back(b);v.push_back(c);v.push_back(b);v.push_back(d);v.push_back(c);}
+    dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST,static_cast<UINT>(v.size()/3),v.data(),sizeof(Vertex));
+}
+void outline(IDirect3DDevice9* dev,float x,float y,float w,float h,float t,DWORD c){frect(dev,x,y,w,t,c);frect(dev,x,y+h-t,w,t,c);frect(dev,x,y,t,h,c);frect(dev,x+w-t,y,t,h,c);}
+void drawPicker(IDirect3DDevice9* dev,float k){
+    if(!picker.open||!menu.open||menu.tab!=TAB_LIGHTS)return;   // not the muzzle flash panel
+    float saved=uiAlpha;uiAlpha*=easeOut(menuShow);DWORD acc=accent();
+    float pad=20*k,pw=400*k,x0=48*k+580*k+14*k,y0=56*k,sq=pw-pad*2,sqH=sq*0.62f,barH=22*k,gap=8*k;
+    int n=LIGHT_COLOR_CUSTOM;float sw=(sq-gap*(n-1))/n;
+    float ph=56*k+sqH+16*k+barH+18*k+sw+16*k+30*k+40*k;
+    frect(dev,x0,y0,pw,ph,panelColor());
+    char title[64];std::snprintf(title,sizeof(title),"%s %d",tr("Color de la luz",uiLang),std::clamp(menu.choice(IT_LIGHT_SLOT),0,PHOTO_LIGHTS-1)+1);
+    text(dev,x0+pad,y0+16*k,title,SA_TEXT,22*k);frect(dev,x0+pad,y0+48*k,sq,2*k,withAlpha(acc,0x70));
+    float hue=std::fmod(std::fmod(picker.h,360.f)+360.f,360.f);
+    float sx=x0+pad,sy=y0+56*k;   // saturation left to right, brightness top to bottom
+    gradientCells(dev,sx,sy,sq,sqH,12,12,[&](float u,float v){return argb(hsvColor(hue,u,1-v));});
+    outline(dev,sx-1*k,sy-1*k,sq+2*k,sqH+2*k,1*k,0x80FFFFFF);
+    float cx=sx+picker.s*sq,cy=sy+(1-picker.v)*sqH,r=8*k;
+    outline(dev,cx-r-1*k,cy-r-1*k,2*r+2*k,2*r+2*k,2*k,0xFF000000);outline(dev,cx-r,cy-r,2*r,2*r,2*k,0xFFFFFFFF);
+    float by=sy+sqH+16*k;
+    gradientCells(dev,sx,by,sq,barH,36,1,[&](float u,float){return argb(hueColor(u*360.f,1));});
+    float hx=sx+hue/360.f*sq;outline(dev,hx-4*k,by-3*k,8*k,barH+6*k,2*k,0xFFFFFFFF);
+    float py=by+barH+18*k;
+    for(int i=0;i<n;++i){float px=sx+(sw+gap)*i;const LightColor& c=lightColors[i];
+        frect(dev,px,py,sw,sw,argb({c.r,c.g,c.b}));if(i==picker.preset)outline(dev,px-3*k,py-3*k,sw+6*k,sw+6*k,2*k,acc);}
+    float ty=py+sw+16*k;Rgb now=hsvColor(hue,picker.s,picker.v);
+    frect(dev,sx,ty,30*k,26*k,0xFFFFFFFF);frect(dev,sx+2*k,ty+2*k,26*k,22*k,argb(now));
+    text(dev,sx+40*k,ty+2*k,hexColor(now).c_str(),SA_TEXT,20*k);
+    if(picker.preset>=0)text(dev,sx+sq,ty+2*k,lightColors[picker.preset].label,SA_DIM,18*k,RIGHT);
+    // hints
+    float fy=ty+40*k,fx=sx,is=22*k;frect(dev,sx,fy-6*k,sq,1*k,withAlpha(acc,0x50));
+    auto lab=[&](const char* t){text(dev,fx+3*k,fy+2*k,t,SA_DIM,16*k);fx+=textW(t,16*k)+14*k;};
+    if(lastInputKeyboard){
+        auto cap=[&](const char* a){float wcap=std::max(is,textW(a,is*0.62f)+is*0.5f);keycap(dev,fx+wcap,fy,is,a);fx+=wcap+3*k;};
+        cap("WASD");lab("Color");cap("Q");cap("E");lab("Tono");cap("1-9");lab("Preset");cap("Enter");lab("Aceptar");cap("Esc");lab("Cancelar");
+    }else{
+        auto ic=[&](Icon a){icon(dev,fx,fy,is,a);fx+=is+3*k;};
+        ic(IC_THUMBL);lab("Color");ic(IC_L1);ic(IC_R1);lab("Tono");ic(IC_SQUARE);lab("Preset");ic(IC_CROSS);lab("Aceptar");ic(IC_CIRCLE);lab("Cancelar");
+    }
+    uiAlpha=saved;
+}
 void drawUi(IDirect3DDevice9* dev,float w,float h){
     thumbLoadsLeft=1;
     unsigned long long now=GetTickCount64();uiDt=lastUiTick?std::min(0.1f,static_cast<float>(now-lastUiTick)/1000.f):0;lastUiTick=now;
@@ -271,9 +347,9 @@ void drawUi(IDirect3DDevice9* dev,float w,float h){
     uiAlpha=easeOut(uiShow);
     if(uiAlpha>0.01f&&menu.open&&menu.tab==TAB_LIGHTS)drawLightMarkers(dev,w,h,k);   // H / Triangle hides them with the rest
     if(uiAlpha>0.01f){
-        if(menuShow>0.01f)drawMenu(dev,w,h,k);
+        if(menuShow>0.01f){drawMenu(dev,w,h,k);drawPicker(dev,k);drawFlashEdit(dev,k);}
         if(promptsShow>0.01f)drawPrompts(dev,w,h,k);
-        drawStatus(dev,w,k);
+        drawStatus(dev,w,h,k);
     }
     uiAlpha=1;drawToast(dev,w,k);
 }
@@ -281,7 +357,7 @@ void drawUi(IDirect3DDevice9* dev,float w,float h){
 // ---------- 90s camcorder stamp (part of the photo when the filter is "Cámara de los 90") ----------
 // "PLAY" with its triangle top left, time and date bottom right in a blocky OSD face: the game clock, today's month and day, 1992.
 FontAtlas stampFont;
-void drawCamcorderStamp(IDirect3DDevice9* dev,float w,float h,Bars bars){
+void drawCamcorderStamp(IDirect3DDevice9* dev,float w,float h,Bars bars,bool vhs){
     if(!stampFont.tried)buildFont(dev,stampFont,L"StampFont",L"OCR A Extended",L"Consolas",FW_BOLD,48);
     float saved=uiAlpha;uiAlpha=1;
     float size=h*0.042f,m=h*0.05f,x0=bars.side+m*1.4f,x1=w-bars.side-m*1.4f,y0=bars.top+m,y1=h-bars.top-m-size;
@@ -291,6 +367,9 @@ void drawCamcorderStamp(IDirect3DDevice9* dev,float w,float h,Bars bars){
     osd(x0,y0,"PLAY",LEFT);
     float tx=x0+textW("PLAY",size,stampFont)+size*0.45f,ty=y0+size*0.22f,th=size*0.62f;   // the play triangle, drawn as thin slices
     for(int i=0;i<24;++i){float t=i/24.f,hh=th*(1-t);rect(dev,tx+th*0.8f*t,ty+(th-hh)*0.5f,th*0.8f/24.f+0.5f,hh,0xFFF2F2F2);}
+    if(vhs){   // a VCR's display instead of the camera's date: tape speed and the counter (the game clock)
+        char counter[24];std::snprintf(counter,sizeof(counter),"0:%02d:%02d",mem<BYTE>(CLOCK_HOURS)%60,mem<BYTE>(CLOCK_MINUTES));
+        osd(x1,y0,"SP",RIGHT);osd(x1,y1,counter,RIGHT);uiAlpha=saved;return;}
     static const char* months[]={"JAN.","FEB.","MAR.","APR.","MAY","JUN.","JUL.","AUG.","SEP.","OCT.","NOV.","DEC."};
     SYSTEMTIME st{};GetLocalTime(&st);int hour=mem<BYTE>(CLOCK_HOURS),minute=mem<BYTE>(CLOCK_MINUTES);
     char clock[16],date[24];std::snprintf(clock,sizeof(clock),"%s %d:%02d",hour<12?"AM":"PM",hour%12?hour%12:12,minute);
@@ -305,10 +384,18 @@ void drawLightMarkers(IDirect3DDevice9* dev,float w,float h,float k){
     Basis b=basis_from_angles(yaw,pitch,roll);float tanV=std::tan(renderFov()*PI/360.f)*0.75f,aspect=w/h;
     for(int i=0;i<PHOTO_LIGHTS;++i){
         const PhotoLight& l=photoLights[i];if(!l.placed||l.type==2)continue;
-        Vec3 d=sub(l.pos,pose.pos);float z=dot(d,b.forward);if(z<0.2f)continue;
-        float sx=w*0.5f+dot(d,b.right)/z/(tanV*aspect)*w*0.5f,sy=h*0.5f-dot(d,b.up)/z/tanV*h*0.5f;
-        if(sx<0||sy<0||sx>w||sy>h)continue;
+        Vec3 d=sub(l.pos,pose.pos);float z=dot(d,b.forward);
         DWORD col=i==movingLight?0xFF7FD8FF:l.on?0xFFFFE9A0:0xA0B0B0B0;float r=(i==movingLight?18:14)*k;
+        float sx=0,sy=0;bool inside=z>=0.2f;
+        if(inside){sx=w*0.5f+dot(d,b.right)/z/(tanV*aspect)*w*0.5f;sy=h*0.5f-dot(d,b.up)/z/tanV*h*0.5f;inside=sx>=0&&sy>=0&&sx<=w&&sy<=h;}
+        if(!inside){   // off screen or behind the camera (Cyberpunk 2.3): an arrow on the screen edge points to it
+            float ax=dot(d,b.right),ay=-dot(d,b.up);float len=std::sqrt(ax*ax+ay*ay);if(len<1e-4f){ax=0;ay=1;len=1;}ax/=len;ay/=len;
+            float mx=w*0.5f-40*k,my=h*0.5f-40*k,t=std::min(std::fabs(ax)>1e-4f?mx/std::fabs(ax):1e9f,std::fabs(ay)>1e-4f?my/std::fabs(ay):1e9f);
+            float ex=w*0.5f+ax*t,ey=h*0.5f+ay*t;
+            for(int s2=0;s2<14;++s2){float f=s2/14.f,half=(1-f)*9*k;float px=ex-ax*(14-s2)*1.6f*k,py=ey-ay*(14-s2)*1.6f*k;
+                rect(dev,px-ay*half-1.5f*k,py+ax*half-1.5f*k,3*k,3*k,col);rect(dev,px+ay*half-1.5f*k,py-ax*half-1.5f*k,3*k,3*k,col);}
+            char n2[4];std::snprintf(n2,sizeof(n2),"%d",i+1);text(dev,ex-ax*34*k,ey-ay*34*k-10*k,n2,col,18*k,CENTER,true);
+            continue;}
         if(l.type==1){   // spotlight: a dotted line shows where it points
             for(int s=1;s<=6;++s){Vec3 q=sub(add(l.pos,mul(l.dir,0.15f*s)),pose.pos);float qz=dot(q,b.forward);if(qz<0.2f)break;
                 float qx=w*0.5f+dot(q,b.right)/qz/(tanV*aspect)*w*0.5f,qy=h*0.5f-dot(q,b.up)/qz/tanV*h*0.5f;rect(dev,qx-2*k,qy-2*k,4*k,4*k,col);}}
